@@ -17,3 +17,4 @@ pytest>=8.0.0
 pyautogui>=0.9.54
 pywinauto>=0.6.8
 keyboard>=0.13.5
+pyzmq>=27.0.0
