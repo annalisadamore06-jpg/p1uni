@@ -108,16 +108,18 @@ class SignalEngine:
         config: dict[str, Any],
         session_manager: SessionManager,
         feature_builder: Any,       # FeatureBuilder
-        ensemble: Any,              # MLEnsemble
+        ensemble: Any,              # MLEnsemble (legacy) or V35Bridge
         risk_manager: Any,          # RiskManager
         ninja_bridge: Any,          # NinjaTraderBridge
         level_validator: Any = None,  # LevelValidator (opzionale)
         telegram: Any = None,
+        v35_bridge: Any = None,     # V35Bridge (se presente, usa V3.5 invece di legacy)
     ) -> None:
         self.config = config
         self.session_mgr = session_manager
         self.feature_builder = feature_builder
         self.ensemble = ensemble
+        self.v35_bridge = v35_bridge  # Se non None, usa V3.5 per le predizioni
         self.risk_mgr = risk_manager
         self.bridge = ninja_bridge
         self.level_validator = level_validator
@@ -184,29 +186,53 @@ class SignalEngine:
             phase_min_conf = self.session_mgr.get_min_confidence()
             rec.step_reached = 1
 
-            # === STEP 2: BUILD FEATURES ===
-            result = self.feature_builder.build_feature_vector(now)
-            if result is None:
+            # === STEP 2 + 3: BUILD FEATURES & ML PREDICTION ===
+            # Se V3.5 bridge disponibile, usa quello (feature + predict in un unico step)
+            if self.v35_bridge is not None:
+                prediction = self.v35_bridge.predict(now)
+                if prediction is None:
+                    rec.step_reached = 3
+                    rec.reason = "V3.5 Bridge returned None (no features)"
+                    return self._finalize(rec, t0)
+
+                # Spot dal feature builder (trade live) se disponibile
+                spot = 0.0
+                if self.feature_builder._last_spot is not None:
+                    spot = self.feature_builder._last_spot
+                rec.spot = spot
+                rec.step_reached = 3
+
+                # V3.5 gestisce i gate internamente — check blocked
+                if prediction.get("blocked"):
+                    rec.step_reached = 3
+                    rec.signal = prediction.get("signal", "NEUTRAL")
+                    rec.confidence = prediction.get("confidence", 0)
+                    rec.reason = f"V3.5 GATE BLOCKED: {prediction.get('block_reason', '')}"
+                    rec.details["gate_results"] = prediction.get("gate_results", [])
+                    return self._finalize(rec, t0)
+
+            else:
+                # Legacy path: feature_builder + ensemble separati
+                result = self.feature_builder.build_feature_vector(now)
+                if result is None:
+                    rec.step_reached = 2
+                    rec.reason = "Feature builder returned None (insufficient data)"
+                    return self._finalize(rec, t0)
+
+                feature_array, feature_dict, is_valid = result
+                if not is_valid:
+                    rec.step_reached = 2
+                    rec.reason = "Features degraded (too many stale values)"
+                    rec.details["is_valid"] = False
+                    return self._finalize(rec, t0)
+
+                spot = feature_dict.get("ofi_buy", 0)
+                if self.feature_builder._last_spot is not None:
+                    spot = self.feature_builder._last_spot
+                rec.spot = spot
                 rec.step_reached = 2
-                rec.reason = "Feature builder returned None (insufficient data)"
-                return self._finalize(rec, t0)
 
-            feature_array, feature_dict, is_valid = result
-            if not is_valid:
-                rec.step_reached = 2
-                rec.reason = "Features degraded (too many stale values)"
-                rec.details["is_valid"] = False
-                return self._finalize(rec, t0)
-
-            # Estrai spot corrente
-            spot = feature_dict.get("ofi_buy", 0)  # fallback
-            if self.feature_builder._last_spot is not None:
-                spot = self.feature_builder._last_spot
-            rec.spot = spot
-            rec.step_reached = 2
-
-            # === STEP 3: ML PREDICTION ===
-            prediction = self.ensemble.predict(feature_dict)
+                prediction = self.ensemble.predict(feature_dict)
             if prediction is None:
                 rec.step_reached = 3
                 rec.reason = "Ensemble returned None (HALTED or error)"

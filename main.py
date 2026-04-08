@@ -176,12 +176,25 @@ class P1UniSystem:
         self._components["ensemble"] = ens
 
         if not ens.is_operational():
-            logger.error("ML Ensemble NOT operational! Signals will be limited.")
-            self._components["telegram"].send_alert(
-                "ML Ensemble NOT operational — check model files", "ERROR"
-            )
+            logger.warning("Legacy ML Ensemble not operational (expected if using V3.5)")
 
-        logger.info(f"ML initialized: mode={ens._mode}")
+        # V3.5 Bridge (prioritario se i modelli esistono)
+        v35_models_dir = Path(self.config.get("_base_dir", ".")) / "ml_models" / "v35_production"
+        if (v35_models_dir / "model_v35_prod_seed42.json").exists():
+            try:
+                from src.ml.v35_bridge import V35Bridge
+                v35 = V35Bridge(self.config)
+                self._components["v35_bridge"] = v35
+                logger.info(f"V3.5 PRODUCTION engine loaded: {v35.get_status()}")
+            except Exception as e:
+                logger.error(f"V3.5 Bridge init failed: {e}")
+                self._components["v35_bridge"] = None
+        else:
+            logger.info("V3.5 models not found, using legacy ensemble")
+            self._components["v35_bridge"] = None
+
+        mode = "V3.5" if self._components.get("v35_bridge") else ens._mode
+        logger.info(f"ML initialized: mode={mode}")
 
     # ============================================================
     # Init: execution
@@ -215,6 +228,7 @@ class P1UniSystem:
             ninja_bridge=bridge,
             level_validator=lv,
             telegram=telegram,
+            v35_bridge=self._components.get("v35_bridge"),
         )
         self._components["signal_engine"] = se
 
