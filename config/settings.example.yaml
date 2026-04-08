@@ -1,0 +1,94 @@
+# P1UNI Configuration - ESEMPIO
+# Copia questo file come settings.yaml e inserisci i tuoi valori reali
+# NON committare settings.yaml (contiene secrets)
+
+system:
+  mode: "paper"  # "paper", "live", "backtest"
+  log_level: "INFO"
+
+database:
+  path: "C:\\Users\\annal\\Desktop\\ML DATABASE\\ml_gold.duckdb"
+  threads: 32
+  memory_limit: "110GB"
+
+databento:
+  api_key: "${DATABENTO_API_KEY}"  # inserisci la tua API key o usa env var
+  symbol: "ES.c.0"                 # continuous front-month
+  next_symbol: "ESM6"              # prossimo contratto (per logging rollover)
+  dataset: "GLBX.MDP3"
+  schema: "trades"
+  flush_interval_sec: 300
+  buffer_size: 200000
+
+gexbot:
+  ws_url: "wss://PLACEHOLDER_GEXBOT_ENDPOINT"  # Annalisa fornira' l'URL
+  reconnect_max_sec: 60
+
+p1lite:
+  enabled: true
+  frequency_hz: 1
+  timezone: "Europe/Zurich"  # P1-Lite usa timezone Zurigo, convertire a UTC!
+
+models:
+  dir: "ml_models/"
+  bounce_file: "bounce_prob.joblib"
+  regime_file: "regime_persistence.joblib"
+  volatility_file: "volatility_30min.joblib"
+  scaler_file: "scaler.joblib"
+  bounce_weight: 0.50
+  regime_weight: 0.30
+  volatility_weight: 0.20  # INVERTITO: usa (1 - vol_prob)
+  min_confidence: 0.60
+
+execution:
+  bridge_host: "127.0.0.1"
+  bridge_port: 5555
+  bar_interval_min: 5
+  feature_window_min: 60
+  ack_timeout_sec: 5
+  heartbeat_interval_sec: 30
+
+risk:
+  max_daily_loss_pts: 40    # 1 pt ES = $50, quindi max $2000/giorno
+  max_consec_losses: 5
+  reset_hour_utc: 22
+
+sessions:  # orari UTC
+  night_early:
+    start: "22:00"
+    end: "01:00"
+    trading: false           # solo osservazione
+  night_full:
+    start: "01:00"
+    end: "09:30"
+    trading: true
+    min_confidence: 0.70     # piu' conservativo di notte
+    max_trades: 2
+  morning:
+    start: "09:30"
+    end: "12:00"
+    trading: true
+    min_confidence: 0.60
+  afternoon:
+    start: "12:00"
+    end: "20:00"
+    trading: true
+    min_confidence: 0.60
+  stop:
+    start: "20:00"
+    end: "22:00"
+    trading: false           # chiudi posizioni, nessun nuovo trade
+
+telegram:
+  token: "${TELEGRAM_BOT_TOKEN}"
+  chat_id: "${TELEGRAM_CHAT_ID}"
+  heartbeat_interval_min: 5
+  rate_limit_sec: 3          # max 1 msg ogni 3 secondi
+
+tickers:
+  valid: ["ES", "NQ", "SPY", "QQQ", "VIX", "IWM", "TLT", "GLD", "UVXY"]
+  primary: "ES"
+
+dashboard:
+  port: 8501
+  enabled: false  # opzionale, attivare se serve Streamlit

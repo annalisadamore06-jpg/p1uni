@@ -1,0 +1,39 @@
+# Database
+*.duckdb
+*.duckdb.wal
+*.duckdb.tmp/
+duckdb_tmp/
+
+# Data
+data/
+ml_models/
+*.joblib
+*.csv
+
+# Secrets
+config/settings.yaml
+live_config.json
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+logs/
+*.log
