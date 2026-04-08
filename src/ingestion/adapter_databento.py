@@ -279,10 +279,14 @@ class DatabentoAdapter(BaseAdapter):
         )
 
         self._client = db.Live(key=self.api_key)
+
+        # stype_in: "continuous" per ES.c.0, "raw_symbol" per ESM5
+        stype = "continuous" if ".c." in self.symbol else "raw_symbol"
         self._client.subscribe(
             dataset=self.dataset,
             schema=self.schema,
             symbols=[self.symbol],
+            stype_in=stype,
         )
         self._log.info("Databento connected and subscribed")
 
