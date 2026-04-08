@@ -179,11 +179,20 @@ def _convert_timestamp(raw_ts: Any) -> datetime | None:
 def _convert_side(raw_side: Any) -> str:
     """Converte il campo side/aggressor Databento in 'B' o 'A'.
 
-    Databento usa:
-    - int: 1 = buyer aggressor, 2 = seller aggressor
-    - str: "B", "BUY", "BUYER" = buyer; "A", "ASK", "SELL", "SELLER" = seller
-    - In alcuni schemi: derivato da flags bitfield
+    Databento TradeMsg.side e' un enum Side con:
+    - Side.BID (value="B") = buyer aggressor (hit the ask)
+    - Side.ASK (value="A") = seller aggressor (hit the bid)
+    - Side.NONE (value="N") = unknown
+
+    Supporta anche: int (1=buy, 2=sell), str ("B"/"A")
     """
+    # Enum con .value (Databento Side enum)
+    if hasattr(raw_side, "value"):
+        val = str(raw_side.value).strip().upper()
+        if val in ("B", "BID"):
+            return "B"
+        return "A"
+
     if isinstance(raw_side, int):
         return "B" if raw_side == 1 else "A"
 
@@ -301,6 +310,11 @@ class DatabentoAdapter(BaseAdapter):
         for record in self._client:
             if not self._running or self._shutdown_event.is_set():
                 break
+
+            # Filtra: solo TradeMsg (ignora SystemMsg, SymbolMappingMsg, etc.)
+            rtype = type(record).__name__
+            if rtype != "TradeMsg":
+                continue
 
             parsed = self._parse_trade(record)
             if parsed is not None:
