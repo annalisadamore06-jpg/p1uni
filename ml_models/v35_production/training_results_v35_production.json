@@ -1,0 +1,322 @@
+{
+  "model_version": "V3.5_PRODUCTION",
+  "timestamp": "2026-04-08T18:02:46.804321",
+  "n_features": 222,
+  "feature_type": "GREEN only (no MBO, no gex_strikes)",
+  "n_samples": 5761,
+  "n_oos": 3841,
+  "class_balance": {
+    "DOWN": 2982,
+    "UP": 2779
+  },
+  "oos_metrics": {
+    "accuracy": 0.6060921634990888,
+    "auc": 0.6591588875907921,
+    "mcc": 0.208607435045273
+  },
+  "fold_results": [
+    {
+      "fold": 1,
+      "train": 1920,
+      "test": 960,
+      "acc": 0.6645833333333333,
+      "auc": 0.716109460774095,
+      "wr_70": 0.7963525835866262,
+      "n_70": 329,
+      "best_iters": [
+        35,
+        13,
+        70
+      ]
+    },
+    {
+      "fold": 2,
+      "train": 2880,
+      "test": 960,
+      "acc": 0.58125,
+      "auc": 0.6753749321758002,
+      "wr_70": 0.7859922178988327,
+      "n_70": 257,
+      "best_iters": [
+        4,
+        21,
+        26
+      ]
+    },
+    {
+      "fold": 3,
+      "train": 3840,
+      "test": 960,
+      "acc": 0.571875,
+      "auc": 0.6267809744638009,
+      "wr_70": 0.84251968503937,
+      "n_70": 127,
+      "best_iters": [
+        10,
+        2,
+        7
+      ]
+    },
+    {
+      "fold": 4,
+      "train": 4800,
+      "test": 960,
+      "acc": 0.60625,
+      "auc": 0.6299005151193425,
+      "wr_70": 0.7536231884057971,
+      "n_70": 69,
+      "best_iters": [
+        37,
+        34,
+        38
+      ]
+    },
+    {
+      "fold": 5,
+      "train": 5760,
+      "test": 1,
+      "acc": 1.0,
+      "auc": NaN,
+      "wr_70": 0,
+      "n_70": 0,
+      "best_iters": [
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "confidence_thresholds": [
+    {
+      "threshold": 0.5,
+      "n_trades": 3841,
+      "win_rate": 0.6060921634990888,
+      "pct_total": 100.0,
+      "ev_per_trade": 0.515230408747722
+    },
+    {
+      "threshold": 0.55,
+      "n_trades": 2221,
+      "win_rate": 0.6690679873930662,
+      "pct_total": 57.82348346784691,
+      "ev_per_trade": 0.6726699684826655
+    },
+    {
+      "threshold": 0.6,
+      "n_trades": 1540,
+      "win_rate": 0.7253246753246754,
+      "pct_total": 40.09372559229367,
+      "ev_per_trade": 0.8133116883116884
+    },
+    {
+      "threshold": 0.65,
+      "n_trades": 1134,
+      "win_rate": 0.7592592592592593,
+      "pct_total": 29.523561572507163,
+      "ev_per_trade": 0.8981481481481481
+    },
+    {
+      "threshold": 0.7,
+      "n_trades": 782,
+      "win_rate": 0.7966751918158568,
+      "pct_total": 20.35928143712575,
+      "ev_per_trade": 0.9916879795396418
+    },
+    {
+      "threshold": 0.75,
+      "n_trades": 383,
+      "win_rate": 0.8459530026109661,
+      "pct_total": 9.971361624576932,
+      "ev_per_trade": 1.114882506527415
+    },
+    {
+      "threshold": 0.8,
+      "n_trades": 111,
+      "win_rate": 0.8648648648648649,
+      "pct_total": 2.8898724290549334,
+      "ev_per_trade": 1.1621621621621623
+    }
+  ],
+  "top_features": [
+    [
+      "spot_vs_zero_gamma_L3",
+      54.06526565551758
+    ],
+    [
+      "zero_major_short_gamma",
+      52.39630126953125
+    ],
+    [
+      "call_put_pressure_L2",
+      45.09941864013672
+    ],
+    [
+      "one_major_call",
+      29.8201847076416
+    ],
+    [
+      "gex_ratio_total",
+      24.593812942504883
+    ],
+    [
+      "gex_flow_best_STD3",
+      24.096263885498047
+    ],
+    [
+      "gex_decay_factor",
+      23.43142318725586
+    ],
+    [
+      "spot_vs_zero_gamma_L2",
+      23.299779891967773
+    ],
+    [
+      "zero_major_put",
+      22.720314025878906
+    ],
+    [
+      "one_major_long_gamma",
+      22.532148361206055
+    ],
+    [
+      "charm_best_STD3",
+      20.557083129882812
+    ],
+    [
+      "one_major_put",
+      19.05336570739746
+    ],
+    [
+      "regime_x_mr1pos",
+      18.392351150512695
+    ],
+    [
+      "mm_composite_STD3",
+      16.13682746887207
+    ],
+    [
+      "charm_best_STD6",
+      15.962545394897461
+    ],
+    [
+      "vanna_best_STD12",
+      15.928412437438965
+    ],
+    [
+      "dist_zg_pct",
+      15.350513458251953
+    ],
+    [
+      "zero_net_dex",
+      14.920848846435547
+    ],
+    [
+      "regime_x_zgdist",
+      14.153034210205078
+    ],
+    [
+      "spot_STD12",
+      14.08874797821045
+    ]
+  ],
+  "production_models": {
+    "42": {
+      "path": "D:\\ml_ensemble_training\\production_models\\model_v35_prod_seed42.json",
+      "best_iteration": 0,
+      "best_score": 0.6295805207328833
+    },
+    "2026": {
+      "path": "D:\\ml_ensemble_training\\production_models\\model_v35_prod_seed2026.json",
+      "best_iteration": 6,
+      "best_score": 0.6367888138862102
+    },
+    "7777": {
+      "path": "D:\\ml_ensemble_training\\production_models\\model_v35_prod_seed7777.json",
+      "best_iteration": 7,
+      "best_score": 0.6387897782063645
+    }
+  },
+  "confusion_matrix": [
+    [
+      1353,
+      645
+    ],
+    [
+      868,
+      975
+    ]
+  ],
+  "training_params": {
+    "objective": "binary:logistic",
+    "eval_metric": [
+      "logloss",
+      "auc"
+    ],
+    "device": "cuda",
+    "tree_method": "hist",
+    "max_depth": 7,
+    "learning_rate": 0.03,
+    "subsample": 0.85,
+    "colsample_bytree": 0.7,
+    "min_child_weight": 10,
+    "gamma": 0.2,
+    "reg_alpha": 0.5,
+    "reg_lambda": 2.0
+  },
+  "excluded_features": {
+    "red_count": 23,
+    "yellow_count": 25,
+    "red_list": [
+      "big_order_count",
+      "big_order_imbalance",
+      "big_order_imbalance_MA12",
+      "big_order_imbalance_MA3",
+      "big_order_imbalance_MA6",
+      "big_order_imbalance_MOM",
+      "big_order_imbalance_STD12",
+      "big_order_imbalance_STD3",
+      "big_order_imbalance_STD6",
+      "big_order_intensity",
+      "cancel_rate",
+      "cancel_rate_signal",
+      "mbo_direction",
+      "mbo_level_signal",
+      "mbo_x_extremity",
+      "mbo_x_regime",
+      "modify_rate",
+      "mr1d_imbalance",
+      "mr1u_imbalance",
+      "spoofing_signal",
+      "total_orders",
+      "total_volume",
+      "trade_rate"
+    ],
+    "yellow_list": [
+      "flow_x_gamma_conc",
+      "gamma_conc_high",
+      "gamma_conc_x_mr1pos",
+      "gamma_concentration",
+      "gamma_concentration_D1",
+      "gamma_concentration_L1",
+      "gamma_concentration_L2",
+      "gamma_concentration_L3",
+      "gamma_concentration_MA12",
+      "gamma_concentration_MA3",
+      "gamma_concentration_MA6",
+      "gamma_concentration_MOM",
+      "gamma_concentration_STD12",
+      "gamma_concentration_STD3",
+      "gamma_concentration_STD6",
+      "gamma_skew",
+      "gamma_skew_signal",
+      "gamma_skew_signal_D1",
+      "gamma_skew_signal_L1",
+      "gamma_skew_signal_L2",
+      "gamma_skew_signal_L3",
+      "gamma_skew_x_regime",
+      "n_strikes",
+      "top1_concentration",
+      "top1_strike_dist"
+    ]
+  }
+}

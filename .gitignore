@@ -6,9 +6,13 @@ duckdb_tmp/
 
 # Data
 data/
-ml_models/
 *.joblib
 *.csv
+
+# ML Models (keep V3.5 production, ignore large legacy models)
+ml_models/*.joblib
+ml_models/*.pkl
+!ml_models/v35_production/
 
 # Secrets
 config/settings.yaml
