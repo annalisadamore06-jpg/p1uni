@@ -80,20 +80,14 @@ class DatabaseManager:
         return self._writer
 
     def get_reader(self) -> duckdb.DuckDBPyConnection:
-        """Crea una NUOVA connessione read-only ogni volta.
+        """Ritorna una connessione per lettura.
 
-        QWEN: riconnettere ad ogni ciclo e' intenzionale!
-        Serve per leggere i dati piu freschi scritti dal writer.
-        Il caller DEVE chiudere la connessione dopo l'uso (o usare context manager).
+        Per DB locale (stesso processo): usa il writer (evita conflitti di config).
+        Per DB esterno read-only: apri connessione separata.
         """
-        return duckdb.connect(
-            str(self._db_path),
-            read_only=True,
-            config={
-                "threads": str(self._threads),
-                "memory_limit": self._memory_limit,
-            },
-        )
+        # In-process: riusa il writer per evitare
+        # "Can't open with different configuration" error
+        return self.get_writer()
 
     def execute_write(self, query: str, params: list[Any] | None = None) -> None:
         """Esegue una query di scrittura con thread lock.
@@ -111,18 +105,15 @@ class DatabaseManager:
     def execute_read(self, query: str, params: list[Any] | None = None) -> pd.DataFrame:
         """Esegue una query di lettura e ritorna un DataFrame.
 
-        QWEN: apre una nuova connessione read-only, esegue, chiude.
-        Sicuro da chiamare da qualsiasi thread.
+        Usa la stessa connessione del writer (in-process, thread-locked).
         """
-        conn = self.get_reader()
-        try:
+        with self._writer_lock:
+            conn = self.get_reader()
             if params:
                 result = conn.execute(query, params)
             else:
                 result = conn.execute(query)
             return result.fetchdf()
-        finally:
-            conn.close()
 
     def close(self) -> None:
         """Chiude la connessione writer. Chiamare al shutdown."""

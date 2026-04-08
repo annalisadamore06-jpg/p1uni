@@ -186,6 +186,9 @@ class SessionManager:
         # Callbacks per eventi
         self._on_freeze_callbacks: list[Callable[[str, dict], None]] = []
 
+        # Crea tabelle se non esistono (per DB locale nuovo)
+        self._ensure_tables()
+
         # Carica stato dal DB (per riavvio a caldo)
         self._load_state_from_db()
 
@@ -194,6 +197,41 @@ class SessionManager:
 
         self._initialized = True
         logger.info(f"SessionManager initialized. Phase: {self._current_phase.value}")
+
+    def _ensure_tables(self) -> None:
+        """Crea tabelle necessarie se non esistono (DB locale nuovo)."""
+        try:
+            self.db.execute_write("""
+                CREATE TABLE IF NOT EXISTS daily_ranges_snapshot (
+                    session_date DATE, ticker VARCHAR DEFAULT 'ES',
+                    source VARCHAR, mr1d DOUBLE, mr1u DOUBLE,
+                    mr2d DOUBLE, mr2u DOUBLE, or1d DOUBLE, or1u DOUBLE,
+                    or2d DOUBLE, or2u DOUBLE, vwap DOUBLE,
+                    session_high DOUBLE, session_low DOUBLE,
+                    close_price DOUBLE, is_final BOOLEAN DEFAULT FALSE,
+                    frozen_at TIMESTAMP
+                )
+            """)
+            self.db.execute_write("""
+                CREATE TABLE IF NOT EXISTS intraday_ranges_stream (
+                    ts_utc TIMESTAMP, session_date DATE,
+                    ticker VARCHAR DEFAULT 'ES', source VARCHAR DEFAULT 'P1_LITE',
+                    spot DOUBLE, running_high DOUBLE, running_low DOUBLE,
+                    running_vwap DOUBLE, volume_cumulative BIGINT,
+                    mr1d DOUBLE, mr1u DOUBLE, or1d DOUBLE, or1u DOUBLE,
+                    is_frozen BOOLEAN DEFAULT FALSE
+                )
+            """)
+            self.db.execute_write("""
+                CREATE TABLE IF NOT EXISTS settlement_ranges (
+                    date DATE, vwap DOUBLE, settlement DOUBLE,
+                    mr1d DOUBLE, mr1u DOUBLE, mr2d DOUBLE, mr2u DOUBLE,
+                    or1d DOUBLE, or1u DOUBLE, or2d DOUBLE, or2u DOUBLE,
+                    skew DOUBLE, vix DOUBLE
+                )
+            """)
+        except Exception as e:
+            logger.warning(f"Table creation: {e}")
 
     # ============================================================
     # API pubblica
