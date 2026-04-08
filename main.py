@@ -133,13 +133,13 @@ class P1UniSystem:
         db = self._components["db"]
         telegram = self._components["telegram"]
 
-        # GexBot WS
-        if self.config.get("gexbot", {}).get("ws_url"):
+        # GexBot (Azure Web PubSub)
+        if self.config.get("gexbot", {}).get("api_key"):
             from src.ingestion.adapter_ws import GexBotWebSocketAdapter
             self._components["adapter_ws"] = GexBotWebSocketAdapter(self.config, db, telegram)
-            logger.info("GexBot WS adapter initialized")
+            logger.info("GexBot adapter initialized (Azure Web PubSub)")
         else:
-            logger.warning("GexBot WS adapter DISABLED (no ws_url in config)")
+            logger.warning("GexBot adapter DISABLED (no api_key in config)")
 
         # P1-Lite
         if self.config.get("p1lite", {}).get("enabled", False):

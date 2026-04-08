@@ -1,323 +1,221 @@
 """
-GexBot WebSocket Adapter - Riceve livelli GEX in tempo reale
+GexBot WebSocket Adapter — Azure Web PubSub + Protobuf + Zstandard
 
-Eredita da BaseAdapter. Implementa connect(), listen(), disconnect().
-Il batch writing, la validazione, la quarantena e il reconnect
-sono gestiti automaticamente da BaseAdapter.
+Basato su codice ufficiale: https://github.com/nfa-llc/quant-python-sockets
 
-FLUSSO:
-  GexBot WS -> connect() -> listen() -> _parse_gex_message() -> process_message()
-                                              |
-                                    BaseAdapter._queue -> batch writer -> DB
+Protocollo:
+  1. GET /negotiate con API key -> ottiene websocket_urls per ogni hub
+  2. Connette a hub via Azure Web PubSub client
+  3. Joina gruppi: {prefix}_{ticker}_{package}_{category}
+  4. Riceve Protobuf compresso con Zstandard -> decomprime -> parsa
+  5. Invia a BaseAdapter.process_message() -> queue -> batch writer -> DB
 
-CONFIGURAZIONE (settings.yaml):
-  gexbot:
-    ws_url: "wss://..."
-    tickers: ["ES", "NQ", "SPY"]
-    subscribe_action: "subscribe"
-    ping_interval_sec: 25
-    reconnect_alert_after_sec: 300  # alert critico dopo 5 min di disconnessione
-
-PROTOCOLLO WS GexBot (tipico):
-  -> Client invia: {"action": "subscribe", "tickers": ["ES", "NQ"]}
-  <- Server invia: {"type": "gex", "ticker": "ES", "data": {...}}
-  <- Server invia: {"type": "heartbeat"}
-  <- Server invia: {"type": "greeks", "ticker": "ES", "data": {...}}
+Hubs: classic, state_gex, state_greeks_zero, state_greeks_one, orderflow
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import requests
+from google.protobuf import any_pb2
+
 from src.core.database import DatabaseManager
 from src.ingestion.base_adapter import BaseAdapter
 
-logger = logging.getLogger("p1uni.ingestion.ws")
+logger = logging.getLogger("p1uni.ingestion.gexbot")
 
-# Tipi di messaggio che NON sono dati di mercato (ignorare o loggare)
-_NON_DATA_TYPES = {"heartbeat", "pong", "status", "info", "welcome", "error", "ack"}
+NEGOTIATE_URL = "https://api.gexbot.com/negotiate"
+
+# Aggiungi path per proto generati
+_INGESTION_DIR = str(Path(__file__).parent)
+if _INGESTION_DIR not in sys.path:
+    sys.path.insert(0, _INGESTION_DIR)
 
 
 class GexBotWebSocketAdapter(BaseAdapter):
-    """Adapter WebSocket per GexBot. Riceve livelli GEX e Greeks live.
+    """Adapter GexBot via Azure Web PubSub. Eredita BaseAdapter."""
 
-    Eredita da BaseAdapter:
-    - Queue thread-safe + batch writer (ogni 5s o 500 record)
-    - Auto-reconnect con backoff esponenziale
-    - Validazione + quarantena automatica
-    - Metriche per monitoring
-
-    Le sottoclassi non devono gestire nulla di questo.
-    """
-
-    def __init__(
-        self,
-        config: dict[str, Any],
-        db: DatabaseManager,
-        telegram: Any = None,
-    ) -> None:
+    def __init__(self, config: dict[str, Any], db: DatabaseManager, telegram: Any = None) -> None:
         gexbot_cfg = config.get("gexbot", {})
-
         super().__init__(
-            adapter_name="gexbot_ws",
-            source_type="WS",
-            target_table="gex_summary",  # tabella primaria, greeks vanno in greeks_summary
-            config=config,
-            db=db,
-            telegram=telegram,
+            adapter_name="gexbot_ws", source_type="WS", target_table="gex_summary",
+            config=config, db=db, telegram=telegram,
         )
-
-        # Config WS
-        self.ws_url: str = gexbot_cfg.get("ws_url", "")
-        self.tickers: list[str] = gexbot_cfg.get("tickers", ["ES"])
-        self.subscribe_action: str = gexbot_cfg.get("subscribe_action", "subscribe")
-        self.ping_interval: int = gexbot_cfg.get("ping_interval_sec", 25)
-        self.reconnect_alert_sec: int = gexbot_cfg.get("reconnect_alert_after_sec", 300)
-
-        # Stato connessione
-        self._ws: Any = None  # websocket.WebSocket instance
-        self._connected_since: datetime | None = None
-        self._disconnected_since: datetime | None = None
-        self._critical_alert_sent: bool = False
-
-        # Cache GEX per feature_builder (aggiornamento atomico)
+        self.api_key: str = gexbot_cfg.get("api_key", os.environ.get("GEXBOT_API_KEY", ""))
+        self.tickers: list[str] = gexbot_cfg.get("tickers", ["ES_SPX"])
+        self.hubs_config: dict[str, list[str]] = gexbot_cfg.get("hubs", {
+            "classic": ["gex_full", "gex_zero", "gex_one"],
+            "state_greeks_zero": ["delta_zero", "gamma_zero", "vanna_zero", "charm_zero"],
+            "state_greeks_one": ["delta_one", "gamma_one", "vanna_one", "charm_one"],
+            "orderflow": ["orderflow"],
+        })
+        self._clients: list[Any] = []
+        self._prefix: str = "red"
         base_dir = Path(config.get("_base_dir", "."))
         self._gex_cache_path = base_dir / "data" / "cache" / "gex_cache.json"
 
-    # ============================================================
-    # Metodi astratti implementati
-    # ============================================================
-
     def connect(self) -> None:
-        """Stabilisce la connessione WebSocket e invia subscribe.
+        """Negozia con GexBot API e connette a tutti gli hub."""
+        if not self.api_key:
+            raise ConnectionError("gexbot.api_key non configurato")
 
-        Usa websocket-client (sync) perche' BaseAdapter usa threading, non asyncio.
-        """
-        import websocket
+        from decompression_utils import decompress_gex_message, decompress_greek_message, decompress_orderflow_message
+        self._decompress_gex = decompress_gex_message
+        self._decompress_greek = decompress_greek_message
+        self._decompress_orderflow = decompress_orderflow_message
 
-        if not self.ws_url:
-            raise ConnectionError("gexbot.ws_url non configurato in settings.yaml")
+        self._log.info("Negotiating with GexBot API...")
+        resp = requests.get(NEGOTIATE_URL, headers={"Authorization": f"Basic {self.api_key}"}, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
 
-        self._log.info(f"Connecting to GexBot WS: {self.ws_url}")
+        if "websocket_urls" not in data:
+            raise ConnectionError(f"Negotiate failed: {data}")
 
-        self._ws = websocket.WebSocket()
-        self._ws.settimeout(self.ping_interval + 10)  # timeout > ping interval
-        self._ws.connect(self.ws_url)
+        self._prefix = data.get("prefix", "red")
+        ws_urls = data["websocket_urls"]
+        self._log.info(f"Negotiated OK. Prefix={self._prefix}. Hubs={list(ws_urls.keys())}")
 
-        # Subscribe ai ticker
-        subscribe_msg = json.dumps({
-            "action": self.subscribe_action,
-            "tickers": self.tickers,
-        })
-        self._ws.send(subscribe_msg)
-        self._log.info(f"Subscribed to tickers: {self.tickers}")
+        from azure.messaging.webpubsubclient import WebPubSubClient
+        from azure.messaging.webpubsubclient.models import CallbackType
 
-        self._connected_since = datetime.now(timezone.utc)
-        self._disconnected_since = None
-        self._critical_alert_sent = False
+        for hub_key, url in ws_urls.items():
+            groups = self._build_groups(hub_key)
+            if not groups:
+                continue
+
+            client = WebPubSubClient(url)
+
+            def _on_conn(event, hk=hub_key, grps=groups, cl=client):
+                self._log.info(f"[{hk}] Connected ({event.connection_id})")
+                for g in grps:
+                    try:
+                        cl.join_group(g)
+                        self._log.info(f"[{hk}] Joined {g}")
+                    except Exception as e:
+                        self._log.error(f"[{hk}] Join fail {g}: {e}")
+
+            def _on_msg(event, hk=hub_key):
+                self._on_group_message(hk, event)
+
+            def _on_disc(event, hk=hub_key):
+                self._log.warning(f"[{hk}] Disconnected: {event.message}")
+
+            client.subscribe(CallbackType.CONNECTED, _on_conn)
+            client.subscribe(CallbackType.GROUP_MESSAGE, _on_msg)
+            client.subscribe(CallbackType.DISCONNECTED, _on_disc)
+
+            t = threading.Thread(target=client.open, daemon=True, name=f"gexbot-{hub_key}")
+            t.start()
+            self._clients.append(client)
+            self._log.info(f"[{hub_key}] Started with {len(groups)} groups")
 
     def listen(self) -> None:
-        """Loop di ricezione messaggi WS.
-
-        Per ogni messaggio:
-        - Se heartbeat/status: rispondi pong e logga
-        - Se dati GEX/Greeks: parsa e passa a process_message()
-        - Se errore JSON: logga e continua
-        """
-        last_ping = time.monotonic()
-
+        """Blocca finche' running. I client Azure girano in thread propri."""
         while self._running and not self._shutdown_event.is_set():
-            try:
-                # Ping periodico per tenere viva la connessione
-                now = time.monotonic()
-                if now - last_ping >= self.ping_interval:
-                    self._send_ping()
-                    last_ping = now
-
-                # Ricevi messaggio
-                raw_message = self._ws.recv()
-                if not raw_message:
-                    continue
-
-                self._handle_message(raw_message)
-
-            except Exception as e:
-                if not self._running:
-                    break
-                # Qualsiasi errore WS: esci da listen(), BaseAdapter fara' reconnect
-                self._disconnected_since = datetime.now(timezone.utc)
-                raise ConnectionError(f"WS recv error: {e}") from e
+            self._shutdown_event.wait(1.0)
 
     def disconnect(self) -> None:
-        """Chiude la connessione WebSocket."""
-        if self._ws is not None:
+        for c in self._clients:
             try:
-                self._ws.close()
+                c.close()
             except Exception:
                 pass
-            self._ws = None
-        self._connected_since = None
-        if self._disconnected_since is None:
-            self._disconnected_since = datetime.now(timezone.utc)
+        self._clients.clear()
 
-    # ============================================================
-    # Gestione messaggi
-    # ============================================================
+    def _build_groups(self, hub_key: str) -> list[str]:
+        hub_map = {
+            "classic": ("classic", self.hubs_config.get("classic", [])),
+            "state_gex": ("state", self.hubs_config.get("state_gex", [])),
+            "state_greeks_zero": ("state", self.hubs_config.get("state_greeks_zero", [])),
+            "state_greeks_one": ("state", self.hubs_config.get("state_greeks_one", [])),
+            "orderflow": ("orderflow", self.hubs_config.get("orderflow", [])),
+        }
+        package, categories = hub_map.get(hub_key, ("", []))
+        if not categories:
+            return []
+        return [f"{self._prefix}_{tk}_{package}_{cat}" for tk in self.tickers for cat in categories]
 
-    def _handle_message(self, raw_message: str) -> None:
-        """Parsa e dispatcha un messaggio WS."""
-        # Parse JSON
+    def _on_group_message(self, hub_key: str, event: Any) -> None:
         try:
-            msg = json.loads(raw_message)
-        except json.JSONDecodeError as e:
-            self._log.warning(f"Malformed JSON from WS: {e} | raw={raw_message[:200]}")
-            return
+            any_msg = any_pb2.Any()
+            any_msg.ParseFromString(event.data)
+            type_url = any_msg.type_url
+            category = self._extract_category(event.group)
 
-        if not isinstance(msg, dict):
-            self._log.debug(f"Non-dict message ignored: {type(msg)}")
-            return
-
-        # Determina tipo messaggio
-        msg_type = (msg.get("type") or msg.get("event") or "").lower()
-
-        # Heartbeat / status: non sono dati
-        if msg_type in _NON_DATA_TYPES:
-            self._handle_non_data(msg, msg_type)
-            return
-
-        # Error dal server
-        if msg_type == "error":
-            self._log.error(f"GexBot error: {msg.get('message', msg)}")
-            return
-
-        # Dati di mercato: parsa e invia a process_message
-        parsed = self._parse_gex_message(msg)
-        if parsed is not None:
-            self.process_message(parsed)
-
-            # Aggiorna cache GEX per feature_builder
-            self._update_gex_cache(parsed)
-
-    def _handle_non_data(self, msg: dict[str, Any], msg_type: str) -> None:
-        """Gestisce messaggi non-dati (heartbeat, status, etc.)."""
-        if msg_type == "heartbeat":
-            # Rispondi pong
-            self._send_pong()
-            self._log.debug("Heartbeat received, pong sent")
-        elif msg_type in ("status", "info", "welcome"):
-            self._log.info(f"WS {msg_type}: {msg.get('message', '')}")
-
-    def _send_ping(self) -> None:
-        """Invia ping per mantenere la connessione viva."""
-        if self._ws is not None:
-            try:
-                self._ws.ping()
-            except Exception:
-                pass
-
-    def _send_pong(self) -> None:
-        """Rispondi a un heartbeat del server."""
-        if self._ws is not None:
-            try:
-                self._ws.send(json.dumps({"action": "pong"}))
-            except Exception:
-                pass
-
-    # ============================================================
-    # Parsing messaggi GEX
-    # ============================================================
-
-    def _parse_gex_message(self, msg: dict[str, Any]) -> dict[str, Any] | None:
-        """Estrae campi rilevanti da un messaggio GexBot.
-
-        Il formato esatto dipende dal server GexBot. Gestisce 2 formati:
-
-        Formato 1 (flat):
-            {"ticker": "ES", "timestamp": "...", "call_gex": 5480, ...}
-
-        Formato 2 (nested):
-            {"type": "gex", "ticker": "ES", "data": {"call_gex": 5480, ...}}
-
-        Ritorna un dict grezzo pronto per il UniversalNormalizer (via process_message).
-        """
-        # Formato nested: estrai "data"
-        data = msg.get("data")
-        if isinstance(data, dict):
-            record = dict(data)  # shallow copy
-            # Assicurati che ticker e timestamp siano nel record
-            if "ticker" not in record and "ticker" in msg:
-                record["ticker"] = msg["ticker"]
-            if "timestamp" not in record and "timestamp" in msg:
-                record["timestamp"] = msg["timestamp"]
-        else:
-            # Formato flat: usa il messaggio intero
-            record = dict(msg)
-
-        # Rimuovi campi di protocollo che non sono dati
-        for key in ("type", "event", "action", "channel"):
-            record.pop(key, None)
-
-        # Deve avere almeno un ticker o un prezzo per essere utile
-        has_ticker = any(k in record for k in ("ticker", "symbol", "asset", "instrument"))
-        has_price = any(k in record for k in ("price", "spot", "last_price", "underlying"))
-
-        if not has_ticker and not has_price:
-            self._log.debug(f"Message without ticker/price, skipping: {list(record.keys())}")
-            return None
-
-        return record
-
-    # ============================================================
-    # Cache GEX per feature_builder
-    # ============================================================
-
-    def _update_gex_cache(self, record: dict[str, Any]) -> None:
-        """Aggiorna gex_cache.json atomicamente per la pipeline ML.
-
-        Il feature_builder legge questo file per calcolare gex_proximity.
-        Scrittura atomica: scrivi su .tmp poi rinomina.
-        """
-        try:
-            cache_data = {k: str(v) if isinstance(v, datetime) else v for k, v in record.items()}
-            cache_data["_updated_at"] = datetime.now(timezone.utc).isoformat()
-            cache_data["_source"] = "gexbot_ws"
-
-            self._gex_cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self._gex_cache_path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(cache_data, indent=2, default=str))
-            tmp_path.replace(self._gex_cache_path)
+            if "proto.gex" in type_url or "Gex" in type_url:
+                data = self._decompress_gex(any_msg)
+                if data:
+                    self._ingest_gex(data, hub_key, category)
+            elif "proto.option" in type_url or "OptionProfile" in type_url:
+                data = self._decompress_greek(any_msg, category)
+                if data:
+                    self._ingest_greek(data, category)
+            elif "proto.orderflow" in type_url or "Orderflow" in type_url:
+                data = self._decompress_orderflow(any_msg)
+                if data:
+                    self._ingest_orderflow(data)
         except Exception as e:
-            self._log.debug(f"GEX cache update failed: {e}")
+            self._log.error(f"[{hub_key}] Parse error: {e}")
 
-    # ============================================================
-    # Override: alert critico se disconnesso > 5 min
-    # ============================================================
+    @staticmethod
+    def _extract_category(group_name: str) -> str:
+        for pkg in ("classic", "state", "orderflow"):
+            sep = f"_{pkg}_"
+            if sep in group_name:
+                return group_name.split(sep)[-1]
+        return ""
 
-    def get_stats(self) -> dict[str, Any]:
-        """Estende stats con info connessione WS."""
-        stats = super().get_stats()
-        stats["connected_since"] = (
-            self._connected_since.isoformat() if self._connected_since else None
-        )
-        stats["disconnected_since"] = (
-            self._disconnected_since.isoformat() if self._disconnected_since else None
-        )
+    def _ingest_gex(self, data: dict, hub_key: str, category: str) -> None:
+        record = {
+            "timestamp": data.get("timestamp"), "ticker": data.get("ticker"),
+            "spot": data.get("spot"), "zero_gamma": data.get("zero_gamma"),
+            "call_wall_vol": data.get("major_pos_vol"), "call_wall_oi": data.get("major_pos_oi"),
+            "put_wall_vol": data.get("major_neg_vol"), "put_wall_oi": data.get("major_neg_oi"),
+            "net_gex_vol": data.get("sum_gex_vol"), "net_gex_oi": data.get("sum_gex_oi"),
+            "delta_rr": data.get("delta_risk_reversal"),
+            "hub": "classic" if "classic" in hub_key else "state_gex",
+            "aggregation": category,
+            "n_strikes": len(data.get("strikes", [])),
+            "min_dte": data.get("min_dte"), "sec_min_dte": data.get("sec_min_dte"),
+        }
+        self.process_message(record)
+        self._update_gex_cache(record)
 
-        # Alert critico se disconnesso > reconnect_alert_sec
-        if self._disconnected_since is not None:
-            down_sec = (datetime.now(timezone.utc) - self._disconnected_since).total_seconds()
-            stats["downtime_sec"] = round(down_sec, 1)
-            if down_sec > self.reconnect_alert_sec and not self._critical_alert_sent:
-                self._critical_alert_sent = True
-                self._send_alert(
-                    f"GexBot WS DOWN da {down_sec/60:.0f} minuti! "
-                    f"Livelli GEX NON aggiornati. Verificare connessione.",
-                    level="ERROR",
-                )
+    def _ingest_greek(self, data: dict, category: str) -> None:
+        parts = category.split("_")
+        greek_type = parts[0] if parts else "unknown"
+        dte_type = parts[-1] if len(parts) > 1 else "zero"
+        record = {
+            "timestamp": data.get("timestamp"), "ticker": data.get("ticker"),
+            "spot": data.get("spot"), "greek_type": greek_type, "dte_type": dte_type,
+            "major_positive": data.get("major_positive"),
+            "major_negative": data.get("major_negative"),
+            "major_long_gamma": data.get("major_long_gamma"),
+            "major_short_gamma": data.get("major_short_gamma"),
+            "hub": "classic", "min_dte": data.get("min_dte"), "sec_min_dte": data.get("sec_min_dte"),
+        }
+        self.process_message(record)
 
-        return stats
+    def _ingest_orderflow(self, data: dict) -> None:
+        self.process_message(data)
+
+    def _update_gex_cache(self, record: dict) -> None:
+        try:
+            cache = {k: str(v) if isinstance(v, datetime) else v for k, v in record.items()}
+            cache["_updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._gex_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._gex_cache_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(cache, indent=2, default=str))
+            tmp.replace(self._gex_cache_path)
+        except Exception:
+            pass
