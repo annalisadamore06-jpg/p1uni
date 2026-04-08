@@ -13,3 +13,7 @@ websocket-client>=1.7.0
 streamlit>=1.30.0
 plotly>=5.18.0
 pytest>=8.0.0
+# Automazione NT8 auto-login
+pyautogui>=0.9.54
+pywinauto>=0.6.8
+keyboard>=0.13.5
