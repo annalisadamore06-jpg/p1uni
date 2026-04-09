@@ -63,22 +63,38 @@ logger = logging.getLogger("p1uni.main")
 # ============================================================
 
 def load_config(config_path: str) -> dict[str, Any]:
-    """Carica la configurazione YAML con sostituzione env vars."""
+    """Carica la configurazione YAML con sostituzione env vars.
+
+    Prima carica .env dalla root del progetto, poi fa substitution ${VAR}.
+    """
     path = Path(config_path)
     if not path.exists():
         print(f"ERROR: Config not found: {path}")
         print("Copy config/settings.example.yaml -> config/settings.yaml")
         sys.exit(1)
 
+    # 1. Carica .env file (se esiste)
+    env_path = path.parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k and k not in os.environ:
+                os.environ[k] = v
+
+    # 2. Leggi yaml e sostituisci placeholder
     with open(path, "r", encoding="utf-8") as f:
         raw = f.read()
 
-    # Sostituisci ${ENV_VAR} con valori da ambiente
     for key, val in os.environ.items():
         raw = raw.replace(f"${{{key}}}", val)
 
     config = yaml.safe_load(raw)
-    config["_base_dir"] = str(path.parent.parent)  # p1uni/
+    config["_base_dir"] = str(path.parent.parent)
     config["_config_path"] = str(path)
     return config
 
