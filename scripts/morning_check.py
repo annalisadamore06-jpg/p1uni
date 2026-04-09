@@ -37,9 +37,10 @@ def check_process(name: str) -> tuple[bool, str]:
 
 def check_databento_api() -> tuple[bool, str]:
     try:
+        from src.core.secrets import get_secret
         import databento as db
-        client = db.Historical(key="REDACTED_KEY")
-        # Just check we can authenticate
+        key = get_secret("DATABENTO_API_KEY", required=True)
+        client = db.Historical(key=key)
         return True, "API key valid"
     except Exception as e:
         return False, str(e)
@@ -47,9 +48,11 @@ def check_databento_api() -> tuple[bool, str]:
 
 def check_gexbot_api() -> tuple[bool, str]:
     try:
+        from src.core.secrets import get_secret
+        gex_key = get_secret("GEXBOT_API_KEY", required=True)
         resp = requests.get(
             "https://api.gexbot.com/negotiate",
-            headers={"Authorization": "Basic REDACTED_KEY"},
+            headers={"Authorization": f"Basic {gex_key}"},
             timeout=10
         )
         if resp.status_code == 200 and "websocket_urls" in resp.json():
@@ -144,8 +147,13 @@ def generate_report() -> str:
 
 def send_telegram(message: str) -> None:
     try:
-        url = "https://api.telegram.org/botREDACTED_KEY/sendMessage"
-        requests.post(url, json={"chat_id": "REDACTED_ID", "text": message, "parse_mode": "HTML"}, timeout=10)
+        from src.core.secrets import get_secret
+        token = get_secret("TELEGRAM_BOT_TOKEN")
+        chat_id = get_secret("TELEGRAM_CHAT_ID")
+        if not token or not chat_id:
+            return
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
     except Exception:
         pass
 

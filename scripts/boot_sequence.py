@@ -121,10 +121,14 @@ def step_2_api_checks():
     log.info("STEP 2: API Checks")
     ok = True
 
+    # Load secrets
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from src.core.secrets import get_secret
+
     # Databento
     try:
         import databento as db
-        db.Historical(key="REDACTED_KEY")
+        db.Historical(key=get_secret("DATABENTO_API_KEY", required=True))
         log.info("  Databento API: OK")
     except Exception as e:
         log.error(f"  Databento API: FAIL ({e})")
@@ -133,9 +137,10 @@ def step_2_api_checks():
     # GexBot
     try:
         import requests
+        gex_key = get_secret("GEXBOT_API_KEY", required=True)
         resp = requests.get(
             "https://api.gexbot.com/negotiate",
-            headers={"Authorization": "Basic REDACTED_KEY"},
+            headers={"Authorization": f"Basic {gex_key}"},
             timeout=10
         )
         if resp.status_code == 200:
@@ -232,8 +237,8 @@ def main():
         import requests
         msg = "P1UNI Boot: " + ", ".join(f"{k}={'OK' if v else 'FAIL'}" for k, v in results.items())
         requests.post(
-            "https://api.telegram.org/botREDACTED_KEY/sendMessage",
-            json={"chat_id": "REDACTED_ID", "text": msg}, timeout=10
+            f"https://api.telegram.org/bot{get_secret('TELEGRAM_BOT_TOKEN', '')}/sendMessage",
+            json={"chat_id": get_secret("TELEGRAM_CHAT_ID", ""), "text": msg}, timeout=10
         )
     except Exception:
         pass

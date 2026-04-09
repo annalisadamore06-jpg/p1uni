@@ -21,11 +21,12 @@ import duckdb
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from src.core.secrets import get_secret
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("harvest")
 
-API_KEY = "REDACTED_KEY"
+API_KEY = get_secret("DATABENTO_API_KEY", required=True)
 DATASET = "GLBX.MDP3"
 DB_PATH = str(Path(__file__).parent.parent / "data" / "p1uni_history.duckdb")
 

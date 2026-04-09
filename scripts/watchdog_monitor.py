@@ -31,8 +31,9 @@ BASE_DIR = Path(__file__).parent.parent
 LOG_PATH = BASE_DIR / "logs" / "p1uni.log"
 WATCHDOG_LOG = BASE_DIR / "logs" / "watchdog.log"
 
-TELEGRAM_TOKEN = "REDACTED_KEY"
-TELEGRAM_CHAT_ID = "REDACTED_ID"
+from src.core.secrets import get_secret
+TELEGRAM_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = get_secret("TELEGRAM_CHAT_ID", "")
 
 logging.basicConfig(
     level=logging.INFO,

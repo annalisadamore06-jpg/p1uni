@@ -31,8 +31,8 @@ Sistema fermato alle ~17:00 UTC su richiesta utente. Nessun trade eseguito (pape
 ## PROBLEMI RILEVATI DURANTE LA SESSIONE
 
 ### 1. Databento Live key confusion
-- Key OLD `REDACTED_KEY...`: funzionava per Live (~35K trade), poi improvvisamente **Authentication failed**
-- Key NEW `REDACTED_KEY...`: funzionava per Historical (~1M trade), poi improvvisamente **Authentication failed**
+- Key A (live): funzionava per Live (~35K trade), poi improvvisamente **Authentication failed**
+- Key B (historical): funzionava per Historical (~1M trade), poi improvvisamente **Authentication failed**
 - Entrambe bloccate al momento del fermo sistema
 - **Probabile causa**: rate limit Databento dopo molti retry/reconnect durante i debug
 - **Azione richiesta**: verificare sul portale Databento lo stato delle key e l'utilizzo del piano
