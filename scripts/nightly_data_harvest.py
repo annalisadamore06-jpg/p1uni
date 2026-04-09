@@ -30,8 +30,8 @@ DATASET = "GLBX.MDP3"
 DB_PATH = str(Path(__file__).parent.parent / "data" / "p1uni_history.duckdb")
 
 SYMBOLS = {
-    "ES": "ES.FUT.CME",
-    "NQ": "NQ.FUT.CME",
+    "ES": "ES.c.0",
+    "NQ": "NQ.c.0",
 }
 
 
@@ -80,14 +80,14 @@ def harvest_day(conn: duckdb.DuckDBPyConnection, symbol: str, ticker: str,
             schema=schema,
             start=start,
             end=end,
-            stype_in="continuous" if ".FUT." in symbol else "raw_symbol",
+            stype_in="continuous" if ".c." in symbol else "raw_symbol",
         )
 
         df = data.to_df()
         if df.empty:
             log.info(f"  {ticker} {date.date()}: nessun dato (weekend/holiday?)")
             conn.execute(
-                "INSERT INTO harvest_log VALUES (?,?,?,?,0,?,?,?)",
+                "INSERT INTO harvest_log (symbol, schema_name, start_date, end_date, records_downloaded, download_time_sec, status, error_msg) VALUES (?,?,?,?,0,?,?,?)",
                 [symbol, schema, date.date(), date.date(), time.time()-t0, "EMPTY", ""]
             )
             return 0
@@ -119,7 +119,7 @@ def harvest_day(conn: duckdb.DuckDBPyConnection, symbol: str, ticker: str,
         log.info(f"  {ticker} {date.date()}: {len(records):,} trades ({elapsed:.1f}s)")
 
         conn.execute(
-            "INSERT INTO harvest_log VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO harvest_log (symbol, schema_name, start_date, end_date, records_downloaded, download_time_sec, status, error_msg) VALUES (?,?,?,?,?,?,?,?)",
             [symbol, schema, date.date(), date.date(), len(records), elapsed, "OK", ""]
         )
         return len(records)
@@ -128,7 +128,7 @@ def harvest_day(conn: duckdb.DuckDBPyConnection, symbol: str, ticker: str,
         elapsed = time.time() - t0
         log.error(f"  {ticker} {date.date()}: ERROR {e}")
         conn.execute(
-            "INSERT INTO harvest_log VALUES (?,?,?,?,0,?,?,?)",
+            "INSERT INTO harvest_log (symbol, schema_name, start_date, end_date, records_downloaded, download_time_sec, status, error_msg) VALUES (?,?,?,?,0,?,?,?)",
             [symbol, schema, date.date(), date.date(), elapsed, "ERROR", str(e)[:200]]
         )
         return 0
