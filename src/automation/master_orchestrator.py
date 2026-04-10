@@ -217,10 +217,58 @@ class P1UniManager:
                 pass
         return False
 
+    @staticmethod
+    def is_healthy() -> bool:
+        """Verifica che P1UNI stia effettivamente ingestendo dati (non zombie).
+
+        Controlla se il log ha scritto qualcosa negli ultimi 10 minuti.
+        Un processo zombie e' vivo ma non scrive nulla.
+        """
+        log_file = BASE_DIR / "logs" / "p1uni.log"
+        if not log_file.exists():
+            return False
+        try:
+            import re
+            content = log_file.read_text(encoding="utf-8", errors="ignore")
+            lines = content.strip().split("\n")
+            if not lines:
+                return False
+            # Ultimo timestamp nel log
+            last_line = lines[-1]
+            m = re.search(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", last_line)
+            if not m:
+                return False
+            from datetime import datetime, timezone, timedelta
+            last_ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - last_ts
+            # Se l'ultimo log e' piu vecchio di 10 minuti, il processo e' zombie
+            return age < timedelta(minutes=10)
+        except Exception:
+            return False
+
+    @classmethod
+    def kill_zombie(cls) -> None:
+        """Uccide processi P1UNI zombie."""
+        for p in psutil.process_iter(["cmdline", "pid"]):
+            try:
+                cl = p.info.get("cmdline") or []
+                if any("main.py" in str(a) for a in cl) and any("p1uni" in str(a).lower() or "P1UNI" in str(a) for a in cl):
+                    log.warning(f"Killing zombie P1UNI process PID {p.info['pid']}")
+                    p.kill()
+                    time.sleep(3)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
     @classmethod
     def start(cls, mode: str = "paper") -> bool:
+        # Se running ma zombie, killalo prima
+        if cls.is_running() and not cls.is_healthy():
+            log.warning("P1UNI is running but appears zombie (no log activity > 10 min)")
+            cls.kill_zombie()
+            time.sleep(5)
+
         if cls.is_running():
-            log.info(f"P1UNI already running")
+            log.info(f"P1UNI already running and healthy")
             return True
 
         log.info(f"Launching P1UNI main.py --mode {mode}")
