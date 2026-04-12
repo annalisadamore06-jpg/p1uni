@@ -4,8 +4,9 @@
 *.duckdb.tmp/
 duckdb_tmp/
 
-# Data
+# Data (runtime)
 data/
+!src/data/
 *.joblib
 *.csv
 

@@ -371,16 +371,37 @@ def boot_sequence() -> dict[str, bool]:
 
 
 def monitor_loop(interval_min: int = 5) -> None:
-    """Monitoring continuo: check health ogni N minuti + heartbeat Telegram ogni 4h."""
+    """Monitoring continuo: check health + zombie detection + nightly routine."""
     log.info(f"Starting monitor loop (interval={interval_min}min)")
     last_heartbeat = 0.0
+    nightly_done_today = False
+    last_date = datetime.now(timezone.utc).date()
 
     while True:
         try:
+            now = datetime.now(timezone.utc)
+
+            # Reset nightly flag al cambio giorno
+            if now.date() != last_date:
+                nightly_done_today = False
+                last_date = now.date()
+
+            # Check se P1UNI e' vivo E sano (non zombie)
             running = P1UniManager.is_running()
+            healthy = P1UniManager.is_healthy() if running else False
+
             if not running:
                 log.warning("P1UNI not running! Attempting restart...")
                 telegram_send("P1UNI crash detected, restarting...")
+                P1UniManager.start(mode="paper")
+                time.sleep(30)
+                continue
+
+            if running and not healthy:
+                log.warning("P1UNI zombie detected (alive but no log activity > 10 min)")
+                telegram_send("P1UNI ZOMBIE detected! Killing and restarting...")
+                P1UniManager.kill_zombie()
+                time.sleep(5)
                 P1UniManager.start(mode="paper")
                 time.sleep(30)
                 continue
@@ -389,9 +410,37 @@ def monitor_loop(interval_min: int = 5) -> None:
             now_mono = time.monotonic()
             if now_mono - last_heartbeat > 4 * 3600:
                 ok, total = check_databento_ingesting(timeout_sec=30)
-                msg = f"P1UNI Heartbeat\nRunning: OK\nDatabento trades: {total}\nTime: {datetime.now().strftime('%H:%M')}"
+                msg = (
+                    f"P1UNI Heartbeat\n"
+                    f"Running: {'OK' if healthy else 'DEGRADED'}\n"
+                    f"Databento trades: {total}\n"
+                    f"NT8: {'ON' if NT8Manager.is_running() else 'OFF'}\n"
+                    f"Time: {now.strftime('%H:%M UTC')}"
+                )
                 telegram_send(msg)
                 last_heartbeat = now_mono
+
+            # NIGHTLY ROUTINE (22:15 UTC): gap fill GexBot + Databento consolidation
+            if now.hour == 22 and now.minute >= 15 and not nightly_done_today:
+                log.info("=== NIGHTLY ROUTINE TRIGGERED ===")
+                nightly_done_today = True
+                try:
+                    import yaml
+                    config_path = BASE_DIR / "config" / "settings.yaml"
+                    with open(config_path) as f:
+                        raw = f.read()
+                    for k, v in os.environ.items():
+                        raw = raw.replace(f"${{{k}}}", v)
+                    config = yaml.safe_load(raw)
+                    config["_base_dir"] = str(BASE_DIR)
+
+                    from src.data.unified_ingestor import UnifiedIngestor
+                    ingestor = UnifiedIngestor(config)
+                    results = ingestor.run_nightly(today=now.date())
+                    telegram_send(f"Nightly routine complete: {results}")
+                except Exception as e:
+                    log.error(f"Nightly routine error: {e}")
+                    telegram_send(f"Nightly routine FAILED: {e}")
 
         except Exception as e:
             log.error(f"Monitor cycle error: {e}")
