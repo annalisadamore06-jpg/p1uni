@@ -140,43 +140,74 @@ def boot_p1lite() -> bool:
     log.info("STEP 2: P1-Lite (Chrome)")
 
     P1_URL = "http://127.0.0.1:8060"
+    P1_DIR = Path(r"C:\Users\annal\Desktop\p1-lite")
     CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
-    # Check se Chrome ha gia' P1-Lite aperto
-    for p in psutil.process_iter(["name", "cmdline"]):
+    # Check se collector gia' gira
+    collector_running = False
+    for p in psutil.process_iter(["cmdline"]):
         try:
-            if "chrome" in (p.info["name"] or "").lower():
-                cl = p.info.get("cmdline") or []
-                if any("8060" in str(a) for a in cl):
-                    log.info(f"  P1-Lite gia' aperto in Chrome")
-                    return True
+            cl = " ".join(p.info.get("cmdline") or [])
+            if "collector_lite" in cl:
+                collector_running = True
+                break
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
-    # Verifica che P1-Lite sia raggiungibile
+    # 1. Avvia collector_lite.py (si connette a TWS)
+    if not collector_running:
+        if (P1_DIR / "collector_lite.py").exists():
+            log.info("  Avvio P1-Lite collector_lite.py...")
+            subprocess.Popen(
+                [sys.executable, "collector_lite.py"],
+                cwd=str(P1_DIR),
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+            time.sleep(8)
+            log.info("  Collector avviato")
+        else:
+            log.error(f"  collector_lite.py non trovato in {P1_DIR}")
+            return False
+    else:
+        log.info("  P1-Lite collector gia' attivo")
+
+    # 2. Avvia dashboard app.py (porta 8060)
     try:
-        import requests
-        r = requests.get(P1_URL, timeout=5)
-        if r.status_code != 200:
-            log.warning(f"  P1-Lite non raggiungibile: HTTP {r.status_code}")
-            log.warning(f"  P1-Lite potrebbe non essere avviato (richiede TWS attivo)")
+        import requests as req
+        r = req.get(P1_URL, timeout=3)
+        if r.status_code == 200:
+            log.info(f"  P1-Lite dashboard gia' attivo su {P1_URL}")
+        else:
+            raise Exception("not 200")
+    except Exception:
+        log.info("  Avvio P1-Lite dashboard (app.py)...")
+        if (P1_DIR / "app.py").exists():
+            subprocess.Popen(
+                [sys.executable, "app.py"],
+                cwd=str(P1_DIR),
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+            time.sleep(5)
+        else:
+            log.warning(f"  app.py non trovato in {P1_DIR}")
+
+    # 3. Apri Chrome
+    try:
+        import requests as req
+        r = req.get(P1_URL, timeout=3)
+        if r.status_code == 200:
+            log.info(f"  P1-Lite raggiungibile su {P1_URL}")
+            if Path(CHROME).exists():
+                subprocess.Popen([CHROME, P1_URL])
+            else:
+                os.startfile(P1_URL)
+            time.sleep(3)
+            log.info("  Chrome aperto su P1-Lite")
+            return True
     except Exception:
         log.warning(f"  P1-Lite non raggiungibile su {P1_URL}")
-        log.warning(f"  Se P1-Lite e' un server locale, deve essere avviato separatamente")
 
-    # Apri Chrome
-    log.info(f"  Apertura Chrome su {P1_URL}...")
-    try:
-        if Path(CHROME).exists():
-            subprocess.Popen([CHROME, P1_URL], creationflags=subprocess.CREATE_NEW_CONSOLE)
-        else:
-            os.startfile(P1_URL)
-        time.sleep(5)
-        log.info("  Chrome aperto")
-        return True
-    except Exception as e:
-        log.error(f"  Errore apertura Chrome: {e}")
-        return False
+    return collector_running
 
 
 # ============================================================
