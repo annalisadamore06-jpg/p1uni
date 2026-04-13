@@ -80,10 +80,15 @@ class TelegramBot:
         return self._send(text)
 
     def send_alert(self, message: str, level: str = "INFO") -> bool:
-        """Invia alert generico."""
+        """Invia alert generico. Escape HTML per evitare errori 400."""
+        # Escape caratteri HTML nel messaggio (evita <HTTPSConnection> etc.)
+        safe_msg = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        # Tronca messaggi troppo lunghi
+        if len(safe_msg) > 500:
+            safe_msg = safe_msg[:497] + "..."
         icons = {"INFO": "\u2139\ufe0f", "WARNING": "\u26a0\ufe0f", "ERROR": "\u274c", "CRITICAL": "\U0001f6a8"}
         icon = icons.get(level, "\u2139\ufe0f")
-        text = f"{icon} <b>{level}</b>: {message}"
+        text = f"{icon} <b>{level}</b>: {safe_msg}"
         return self._send(text)
 
     def send_daily_summary(self, risk_status: dict[str, Any]) -> bool:
