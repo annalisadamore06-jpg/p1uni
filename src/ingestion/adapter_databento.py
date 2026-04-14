@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -243,6 +244,10 @@ class DatabentoAdapter(BaseAdapter):
         # Stato
         self._client: Any = None
 
+        # B2: Lock per serializzare _write_to_db (stop() e _batch_writer_loop
+        # girano su thread diversi e condividono la stessa connessione DuckDB)
+        self._write_lock = threading.Lock()
+
         self._ensure_table()
 
     def _ensure_table(self) -> None:
@@ -264,6 +269,11 @@ class DatabentoAdapter(BaseAdapter):
             """)
             self.db.execute_write(
                 "CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades_live(ts_event DESC)"
+            )
+            # B3: UNIQUE constraint necessario per ON CONFLICT DO NOTHING
+            self.db.execute_write(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_unique "
+                "ON trades_live(ts_event, ticker, price, size, side)"
             )
         except Exception as e:
             self._log.error(f"Failed to create trades_live table: {e}")
@@ -414,6 +424,8 @@ class DatabentoAdapter(BaseAdapter):
                 "sale_condition": sale_condition,
                 "source_type": "DATABENTO_STD",
                 "freq_type": "TICK",
+                # B1: ingested_at esplicito (non affidarsi al DEFAULT)
+                "ingested_at": datetime.now(timezone.utc),
             }
 
         except Exception as e:
@@ -430,31 +442,39 @@ class DatabentoAdapter(BaseAdapter):
         Override per gestire le colonne specifiche di trades_live
         e aggiungere ingested_at.
         """
-        import pandas as pd
+        # B1: ingested_at incluso esplicitamente
+        expected_cols = [
+            "ts_event", "ticker", "price", "size", "side",
+            "flags", "sale_condition", "source_type", "freq_type",
+            "ingested_at",
+        ]
+        # Filtra solo colonne presenti
+        available = [c for c in expected_cols if c in df.columns]
+        write_df = df[available].copy()
 
-        conn = self.db.get_writer()
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            # Assicura colonne corrette
-            expected_cols = [
-                "ts_event", "ticker", "price", "size", "side",
-                "flags", "sale_condition", "source_type", "freq_type",
-            ]
-            # Filtra solo colonne presenti
-            available = [c for c in expected_cols if c in df.columns]
-            write_df = df[available].copy()
-
-            conn.register("_trades_batch", write_df)
-            conn.execute(f"INSERT INTO trades_live ({', '.join(available)}) SELECT * FROM _trades_batch")
-            conn.execute("COMMIT")
-            conn.unregister("_trades_batch")
-        except Exception:
+        # B2: Lock per evitare accessi concorrenti alla connessione DuckDB
+        # (stop() chiama _flush_queue dal main thread, _batch_writer_loop
+        # lo chiama dal suo thread -> stesso oggetto conn condiviso)
+        with self._write_lock:
+            conn = self.db.get_writer()
+            conn.execute("BEGIN TRANSACTION")
             try:
-                conn.execute("ROLLBACK")
+                conn.register("_trades_batch", write_df)
+                # B3: ON CONFLICT DO NOTHING per idempotenza (richiede
+                # idx_trades_unique su ts_event, ticker, price, size, side)
+                conn.execute(
+                    f"INSERT INTO trades_live ({', '.join(available)}) "
+                    f"SELECT * FROM _trades_batch ON CONFLICT DO NOTHING"
+                )
+                conn.execute("COMMIT")
                 conn.unregister("_trades_batch")
             except Exception:
-                pass
-            raise
+                try:
+                    conn.execute("ROLLBACK")
+                    conn.unregister("_trades_batch")
+                except Exception:
+                    pass
+                raise
 
     # ============================================================
     # Stats
