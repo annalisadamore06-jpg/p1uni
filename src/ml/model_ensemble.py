@@ -62,12 +62,13 @@ class _ModelSlot:
 
     Gestisce caricamento, fallback e status.
     """
-    __slots__ = ("name", "path", "weight", "model", "status", "load_time_ms", "inverted")
+    __slots__ = ("name", "path", "weight", "original_weight", "model", "status", "load_time_ms", "inverted")
 
     def __init__(self, name: str, path: Path, weight: float, inverted: bool = False) -> None:
         self.name = name
         self.path = path
         self.weight = weight
+        self.original_weight = weight  # preserve for mode recalculation
         self.inverted = inverted  # True per volatilita (alta vol = cattivo)
         self.model: Any = None
         self.status: str = "NOT_LOADED"
@@ -270,6 +271,10 @@ class MLEnsemble:
         HALTED: 0 modelli OK (nessun segnale)
         """
         ok_count = sum(1 for s in self._models.values() if s.status == "OK")
+
+        # Restore original weights before recalculating
+        for s in self._models.values():
+            s.weight = s.original_weight
 
         if ok_count == 3:
             return "FULL"

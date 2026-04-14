@@ -153,7 +153,8 @@ def send_telegram(message: str) -> None:
         if not token or not chat_id:
             return
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
+        # Report is plain text, not HTML/Markdown
+        requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=10)
     except Exception:
         pass
 

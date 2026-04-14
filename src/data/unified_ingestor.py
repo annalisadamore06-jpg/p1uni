@@ -102,33 +102,35 @@ class UnifiedIngestor:
             tickers = TICKER_PRIORITY
 
         conn = duckdb.connect(self.snapshot_db_path)
-        self._ensure_snapshot_table(conn)
+        try:
+            self._ensure_snapshot_table(conn)
 
-        saved = 0
-        calls = 0
+            saved = 0
+            calls = 0
 
-        for ticker in tickers:
-            for package, category in GEXBOT_ENDPOINTS:
+            for ticker in tickers:
+                for package, category in GEXBOT_ENDPOINTS:
+                    if calls >= max_calls:
+                        logger.info(f"Max calls reached ({max_calls})")
+                        break
+
+                    data = self.gexbot_fetch_current(ticker, package, category)
+                    calls += 1
+
+                    if data:
+                        self._save_snapshot(conn, ticker, package, category, data, is_gap_filled=True)
+                        saved += 1
+
+                    time.sleep(0.3)  # rate limit
+
                 if calls >= max_calls:
-                    logger.info(f"Max calls reached ({max_calls})")
                     break
 
-                data = self.gexbot_fetch_current(ticker, package, category)
-                calls += 1
-
-                if data:
-                    self._save_snapshot(conn, ticker, package, category, data, is_gap_filled=True)
-                    saved += 1
-
-                time.sleep(0.3)  # rate limit
-
-            if calls >= max_calls:
-                break
-
-        total = conn.execute("SELECT COUNT(*) FROM gex_snapshots").fetchone()[0]
-        logger.info(f"GexBot gap fill: {saved} snapshots saved ({calls} API calls). Total: {total:,}")
-        conn.close()
-        return saved
+            total = conn.execute("SELECT COUNT(*) FROM gex_snapshots").fetchone()[0]
+            logger.info(f"GexBot gap fill: {saved} snapshots saved ({calls} API calls). Total: {total:,}")
+            return saved
+        finally:
+            conn.close()
 
     def _ensure_snapshot_table(self, conn: duckdb.DuckDBPyConnection) -> None:
         conn.execute("""
@@ -216,17 +218,19 @@ class UnifiedIngestor:
             # Salva
             hist_db = str(Path(self.config.get("_base_dir", ".")) / "data" / "p1uni_history.duckdb")
             conn = duckdb.connect(hist_db)
-            conn.execute("""CREATE TABLE IF NOT EXISTS historical_trades (
-                ts_event TIMESTAMP, ticker VARCHAR, price DOUBLE,
-                size INTEGER, side VARCHAR, flags INTEGER,
-                source VARCHAR DEFAULT 'DATABENTO_HIST',
-                download_date DATE DEFAULT CURRENT_DATE
-            )""")
-            conn.register("_h", idf)
-            conn.execute("INSERT INTO historical_trades (ts_event, ticker, price, size, side, flags) SELECT * FROM _h")
-            conn.unregister("_h")
-            total = conn.execute("SELECT COUNT(*) FROM historical_trades").fetchone()[0]
-            conn.close()
+            try:
+                conn.execute("""CREATE TABLE IF NOT EXISTS historical_trades (
+                    ts_event TIMESTAMP, ticker VARCHAR, price DOUBLE,
+                    size INTEGER, side VARCHAR, flags INTEGER,
+                    source VARCHAR DEFAULT 'DATABENTO_HIST',
+                    download_date DATE DEFAULT CURRENT_DATE
+                )""")
+                conn.register("_h", idf)
+                conn.execute("INSERT INTO historical_trades (ts_event, ticker, price, size, side, flags) SELECT * FROM _h")
+                conn.unregister("_h")
+                total = conn.execute("SELECT COUNT(*) FROM historical_trades").fetchone()[0]
+            finally:
+                conn.close()
 
             logger.info(f"Databento: {len(records):,} trades saved for {start}. Total: {total:,}")
             return len(records)

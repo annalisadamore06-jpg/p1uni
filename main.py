@@ -337,16 +337,20 @@ class P1UniSystem:
         """Aggiorna il session manager ogni secondo."""
         session_mgr = self._components["session_mgr"]
         risk_mgr = self._components["risk_mgr"]
+        last_reset_date = None  # track daily reset by date, not time window
 
         while not self._shutdown_event.is_set():
             try:
                 now = datetime.now(timezone.utc)
                 session_mgr.update(now)
 
-                # Daily reset a 22:00 UTC
-                if now.hour == 22 and now.minute == 0 and now.second < 2:
+                # Daily reset at 22:00 UTC (track by date to avoid missed window)
+                today = now.date()
+                if now.hour >= 22 and last_reset_date != today:
+                    last_reset_date = today
                     risk_mgr.reset_daily()
-                    session_mgr.reset() if hasattr(session_mgr, 'reset') else None
+                    if hasattr(session_mgr, 'reset'):
+                        session_mgr.reset()
 
             except Exception as e:
                 logger.error(f"Session ticker error: {e}")

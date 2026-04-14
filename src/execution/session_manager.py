@@ -169,7 +169,7 @@ class SessionManager:
         self.db = db
 
         # Stato corrente
-        self._state_lock = threading.Lock()
+        self._state_lock = threading.RLock()
         self._current_phase: MarketPhase = MarketPhase.HALT
         self._phase_date: date | None = None
         self._trades_this_phase: int = 0

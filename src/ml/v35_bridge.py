@@ -139,6 +139,7 @@ class V35Bridge:
 
         Unisce dati da: gex_summary, greeks_summary, orderflow.
         """
+        conn = None
         try:
             conn = duckdb.connect(self.gold_db_path, read_only=True)
             features: dict[str, float] = {}
@@ -194,8 +195,6 @@ class V35Bridge:
             except Exception as e:
                 logger.debug(f"Orderflow query: {e}")
 
-            conn.close()
-
             # Feature derivate
             spot = features.get("spot", 0)
             zg = features.get("zero_gamma", 0)
@@ -229,6 +228,12 @@ class V35Bridge:
             if self._last_features:
                 return self._last_features
             return None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     @staticmethod
     def _calc_minutes_since_open(now: datetime) -> float:

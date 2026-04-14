@@ -116,7 +116,7 @@ class NinjaTraderBridge:
         self.event_port: int = int(exec_cfg.get("event_port", 5556))
         self.ack_timeout_ms: int = int(exec_cfg.get("ack_timeout_sec", 5)) * 1000
         self.max_retries: int = int(exec_cfg.get("max_retries", 3))
-        self.heartbeat_interval: int = int(exec_cfg.get("heartbeat_interval_sec", 30))
+        self.heartbeat_interval: int = int(exec_cfg.get("heartbeat_interval_sec", 5))
 
         self.paper_mode: bool = sys_cfg.get("mode", "paper") == "paper"
         self.telegram = telegram
@@ -521,26 +521,49 @@ class NinjaTraderBridge:
     # ============================================================
 
     def _heartbeat_loop(self) -> None:
-        """Thread: invia heartbeat periodico."""
+        """Thread: invia heartbeat periodico (ogni 5s default).
+
+        Invia sia via ZMQ (per il bridge REQ/REP) sia via TCP raw
+        per MLAutoStrategy_P1.cs che ascolta su TcpListenerLoop.
+        Se NT8 non riceve heartbeat per 30s, disabilita il trading.
+        """
         while self._running and not self._shutdown_event.is_set():
             self._shutdown_event.wait(self.heartbeat_interval)
             if not self._running:
                 break
 
+            hb_msg = {
+                "type": "HEARTBEAT",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+            # ZMQ heartbeat (for REQ/REP bridge)
             try:
-                msg = {
-                    "action": "HEARTBEAT",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
+                zmq_msg = {"action": "HEARTBEAT", **hb_msg}
                 with self._cmd_lock:
                     if self._cmd_socket is not None:
-                        self._cmd_socket.send_json(msg)
+                        self._cmd_socket.send_json(zmq_msg)
                         self._cmd_socket.recv_json()
                         self._connected = True
             except Exception:
                 if self._connected:
                     logger.warning("NT8 heartbeat failed — connection may be lost")
                     self._connected = False
+
+            # TCP heartbeat (for MLAutoStrategy_P1 TcpListenerLoop)
+            self._send_tcp_heartbeat(hb_msg)
+
+    def _send_tcp_heartbeat(self, msg: dict[str, Any]) -> None:
+        """Send heartbeat via raw TCP to NT8 strategy listener."""
+        import socket
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(2)
+                sock.connect((self.host, self.cmd_port))
+                payload = json.dumps(msg).encode("utf-8")
+                sock.sendall(payload)
+        except Exception as e:
+            logger.debug(f"TCP heartbeat send failed: {e}")
 
     # ============================================================
     # Helpers

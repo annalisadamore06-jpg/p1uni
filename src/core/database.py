@@ -117,9 +117,10 @@ class DatabaseManager:
 
     def close(self) -> None:
         """Chiude la connessione writer. Chiamare al shutdown."""
-        if self._writer is not None:
-            self._writer.close()
-            self._writer = None
+        with self._writer_lock:
+            if self._writer is not None:
+                self._writer.close()
+                self._writer = None
 
     @classmethod
     def reset(cls) -> None:

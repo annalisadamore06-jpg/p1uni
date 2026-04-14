@@ -43,10 +43,17 @@ namespace NinjaTrader.NinjaScript.Strategies
         private const int    AUTO_FLAT_MIN_UTC      = 55;
         private const double MIN_CONFIDENCE         = 0.62;
 
-        private double   dailyPnL         = 0.0;
-        private int      consecutiveLosses = 0;
-        private int      totalSignals      = 0;
-        private DateTime tradingDay        = DateTime.Today;
+        private double   dailyPnL           = 0.0;
+        private double   dayStartCumProfit  = 0.0;   // CumProfit snapshot at day start
+        private double   lastCumProfit      = 0.0;   // CumProfit after last trade
+        private int      consecutiveLosses  = 0;
+        private int      totalSignals       = 0;
+        private DateTime tradingDay         = DateTime.Today;
+
+        // ===== HEARTBEAT =====
+        private const int    HEARTBEAT_TIMEOUT_SEC = 30;
+        private DateTime     lastHeartbeat         = DateTime.UtcNow;
+        private volatile bool pythonAlive           = true;
 
         // ===== THREAD SAFETY =====
         private readonly object _cacheLock = new object();
@@ -148,6 +155,19 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 JObject signal = JObject.Parse(json);
 
+                // Heartbeat from Python
+                string msgType = signal["type"] != null ? signal["type"].ToString() : "";
+                if (msgType == "HEARTBEAT")
+                {
+                    lastHeartbeat = DateTime.UtcNow;
+                    if (!pythonAlive)
+                    {
+                        pythonAlive = true;
+                        Print("Python heartbeat RESTORED — trading riabilitato");
+                    }
+                    return;
+                }
+
                 string side       = signal["side"] != null ? signal["side"].ToString().ToUpperInvariant() : "";
                 double confidence = signal["confidence"] != null ? signal["confidence"].Value<double>() : 0;
                 string signalId   = signal["signal_id"] != null ? signal["signal_id"].ToString() : ("SIG_" + DateTime.Now.ToString("HHmmss"));
@@ -162,6 +182,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 if (!CheckSessionFilter(side)) return;
                 if (enableGexFilter && !CheckGexFilter(side)) return;
+                if (!pythonAlive)
+                {
+                    Print("Segnale rifiutato: Python heartbeat timeout");
+                    return;
+                }
                 if (!CheckRiskManagement()) return;
 
                 ExecuteTrade(side, confidence, signalId);
@@ -309,6 +334,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (now.Date != tradingDay)
             {
+                double cumProfit = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit;
+                dayStartCumProfit = cumProfit;
+                lastCumProfit     = cumProfit;
                 dailyPnL          = 0;
                 consecutiveLosses = 0;
                 tradingDay        = now.Date;
@@ -417,17 +445,18 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Tracciamento quando posizione torna flat
             if (marketPosition == MarketPosition.Flat && Position.Quantity == 0)
             {
-                double realizedPnL = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit;
-                double tradePnL    = realizedPnL - dailyPnL;
+                double cumProfit = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit;
 
                 if (DateTime.UtcNow.Date != tradingDay)
                 {
-                    dailyPnL          = 0;
+                    dayStartCumProfit = cumProfit;
                     consecutiveLosses = 0;
                     tradingDay        = DateTime.UtcNow.Date;
                 }
 
-                dailyPnL = realizedPnL;
+                double tradePnL = cumProfit - lastCumProfit;
+                lastCumProfit   = cumProfit;
+                dailyPnL        = cumProfit - dayStartCumProfit;
 
                 if (tradePnL < 0)
                 {
@@ -485,6 +514,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (Time[0].Date != tradingDay)
             {
                 double prevPnL = dailyPnL;
+                double cumProfit = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit;
+                dayStartCumProfit = cumProfit;
+                lastCumProfit     = cumProfit;
                 dailyPnL          = 0;
                 consecutiveLosses = 0;
                 tradingDay        = Time[0].Date;
@@ -503,6 +535,28 @@ namespace NinjaTrader.NinjaScript.Strategies
                         ExitShort("DAILY_LOSS_BAR");
                 }
                 return;
+            }
+
+            // ===== HEARTBEAT CHECK =====
+            double secsSinceHeartbeat = (DateTime.UtcNow - lastHeartbeat).TotalSeconds;
+            if (secsSinceHeartbeat > HEARTBEAT_TIMEOUT_SEC)
+            {
+                if (pythonAlive)
+                {
+                    pythonAlive = false;
+                    Print("*** PYTHON HEARTBEAT TIMEOUT *** " + secsSinceHeartbeat.ToString("F0") + "s — trading DISABILITATO");
+                }
+
+                // Close open positions if Python is dead
+                if (Position.MarketPosition != MarketPosition.Flat)
+                {
+                    Print("Chiusura forzata per heartbeat timeout");
+                    if (Position.MarketPosition == MarketPosition.Long)
+                        ExitLong("HB_TIMEOUT");
+                    else
+                        ExitShort("HB_TIMEOUT");
+                }
+                return; // Block all new signals
             }
 
             // Logica segnali gestita via TCP (TcpListenerLoop -> ProcessSignal)

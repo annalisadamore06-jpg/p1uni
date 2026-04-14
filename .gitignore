@@ -3,6 +3,7 @@
 *.duckdb.wal
 *.duckdb.tmp/
 duckdb_tmp/
+*.db
 
 # Data (runtime)
 data/

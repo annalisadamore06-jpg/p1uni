@@ -55,7 +55,11 @@ class LevelValidator:
                 return
 
             row = df.iloc[0]
-            self._levels = {col: float(row[col]) for col in df.columns if col != "date" and row[col] is not None}
+            import math
+            self._levels = {
+                col: float(row[col]) for col in df.columns
+                if col != "date" and row[col] is not None and not (isinstance(row[col], float) and math.isnan(row[col]))
+            }
             self._levels_date = row["date"]
             logger.info(f"Loaded levels for {self._levels_date}: {self._levels}")
         except Exception as e:

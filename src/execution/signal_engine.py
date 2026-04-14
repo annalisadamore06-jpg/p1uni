@@ -197,7 +197,7 @@ class SignalEngine:
 
                 # Spot dal feature builder (trade live) se disponibile
                 spot = 0.0
-                if self.feature_builder._last_spot is not None:
+                if self.feature_builder is not None and getattr(self.feature_builder, '_last_spot', None) is not None:
                     spot = self.feature_builder._last_spot
                 rec.spot = spot
                 rec.step_reached = 3
@@ -210,6 +210,9 @@ class SignalEngine:
                     rec.reason = f"V3.5 GATE BLOCKED: {prediction.get('block_reason', '')}"
                     rec.details["gate_results"] = prediction.get("gate_results", [])
                     return self._finalize(rec, t0)
+
+                # Initialize feature_dict for V3.5 path (used in later steps)
+                feature_dict = prediction.get("features", {})
 
             else:
                 # Legacy path: feature_builder + ensemble separati

@@ -28,11 +28,17 @@ def setup_logging(log_level: str = "INFO", log_dir: str = "logs") -> None:
     # Formato
     fmt = "[%(asctime)s UTC] [%(levelname)s] [%(name)s] %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
+    import time as _time
     formatter = logging.Formatter(fmt, datefmt=datefmt)
+    formatter.converter = _time.gmtime  # Use actual UTC timestamps
 
     # Root logger
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
+
+    # Prevent duplicate handlers on repeated calls
+    if root.handlers:
+        root.handlers.clear()
 
     # Console handler (INFO+)
     console = logging.StreamHandler(sys.stdout)

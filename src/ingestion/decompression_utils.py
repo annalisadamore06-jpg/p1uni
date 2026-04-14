@@ -1,4 +1,5 @@
 import json
+import threading
 import zstandard
 from typing import Dict
 from google.protobuf import any_pb2
@@ -10,10 +11,16 @@ import generated_proto.option_profile_pb2 as option_profile_pb2
 import generated_proto.orderflow_pb2 as orderflow_pb2
 # ------------------------------------
 
-# --- Zstandard Decompressor ---
-# Create a single reusable decompression context
-DCTX = zstandard.ZstdDecompressor()
-# ------------------------------
+# --- Zstandard Decompressor (thread-local for safety) ---
+_thread_local = threading.local()
+
+
+def _get_dctx() -> zstandard.ZstdDecompressor:
+    """Return a per-thread ZstdDecompressor instance."""
+    if not hasattr(_thread_local, "dctx"):
+        _thread_local.dctx = zstandard.ZstdDecompressor()
+    return _thread_local.dctx
+# --------------------------------------------------------
 
 
 def decompress_gex_message(any_message: any_pb2.Any) -> Dict:
@@ -22,7 +29,7 @@ def decompress_gex_message(any_message: any_pb2.Any) -> Dict:
     """
     # 1. Decompress the raw bytes
     compressed_bytes = any_message.value
-    with DCTX.stream_reader(compressed_bytes) as reader:
+    with _get_dctx().stream_reader(compressed_bytes) as reader:
         decompressed_bytes = reader.read()
 
     # 2. Decode the Gex Protobuf data
@@ -75,7 +82,7 @@ def decompress_greek_message(any_message: any_pb2.Any, current_category: str) ->
     """
     # 1. Decompress the raw bytes
     compressed_bytes = any_message.value
-    with DCTX.stream_reader(compressed_bytes) as reader:
+    with _get_dctx().stream_reader(compressed_bytes) as reader:
         decompressed_bytes = reader.read()
 
     # 2. Conditionally deserialize
@@ -149,7 +156,7 @@ def decompress_orderflow_message(any_message: any_pb2.Any) -> Dict:
     """
     # 1. Decompress the raw bytes
     compressed_bytes = any_message.value
-    with DCTX.stream_reader(compressed_bytes) as reader:
+    with _get_dctx().stream_reader(compressed_bytes) as reader:
         decompressed_bytes = reader.read()
 
     # 2. Decode the Orderflow Protobuf data

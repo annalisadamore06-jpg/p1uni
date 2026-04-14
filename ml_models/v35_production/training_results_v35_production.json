@@ -76,7 +76,7 @@
       "train": 5760,
       "test": 1,
       "acc": 1.0,
-      "auc": NaN,
+      "auc": null,
       "wr_70": 0,
       "n_70": 0,
       "best_iters": [

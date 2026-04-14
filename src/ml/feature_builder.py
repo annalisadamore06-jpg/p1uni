@@ -199,6 +199,7 @@ class FeatureBuilder:
         # Stato
         self._last_spot: float | None = None
         self._stale_count: int = 0
+        self._last_trade_ts: str | None = None  # track last processed trade timestamp
 
     def _load_feature_order(self, config: dict[str, Any]) -> None:
         """Carica l'ordine delle feature da feature_names.json se esiste."""
@@ -447,8 +448,15 @@ class FeatureBuilder:
     # ============================================================
 
     def _update_rolling_buffers(self, trades: list[dict[str, Any]]) -> None:
-        """Aggiorna i buffer circolari con i nuovi trade."""
+        """Aggiorna i buffer circolari con i nuovi trade (dedup via timestamp)."""
         for trade in trades:
+            # Skip already-processed trades
+            ts = trade.get("ts_event") or trade.get("ts_utc")
+            ts_str = str(ts) if ts is not None else None
+            if ts_str and self._last_trade_ts and ts_str <= self._last_trade_ts:
+                continue
+            if ts_str:
+                self._last_trade_ts = ts_str
             price = trade.get("price")
             size = trade.get("size", 0)
             side = trade.get("side", "")

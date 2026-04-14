@@ -79,7 +79,7 @@ class RiskManager:
         self.reset_hour_utc: int = int(risk_cfg.get("reset_hour_utc", 22))
 
         # --- Stato corrente ---
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.daily_pnl_pts: float = 0.0
         self.consecutive_losses: int = 0
         self.total_trades_today: int = 0
@@ -238,9 +238,10 @@ class RiskManager:
             # Arrotonda per difetto, min 1, max max_size
             final_size = max(self.min_size, min(self.max_size, int(size)))
 
+            vol_label = f"{vol_factor:.2f}" if current_vol > 0 and self.avg_vol > 0 else "N/A"
             logger.debug(
                 f"Size calc: base={self.base_size} * conf={conf_factor:.1f} "
-                f"* vol_f={vol_factor if current_vol > 0 else 'N/A'} "
+                f"* vol_f={vol_label} "
                 f"-> {final_size} contracts"
             )
             return final_size

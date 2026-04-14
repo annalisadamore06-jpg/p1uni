@@ -63,9 +63,9 @@ class TelegramBot:
                 "text": text,
                 "parse_mode": "HTML",
             }, timeout=5)  # timeout ridotto a 5s per non bloccare
-            self._last_send = now
 
             if resp.status_code == 200:
+                self._last_send = now
                 self._consecutive_failures = 0
                 return True
             else:
@@ -82,11 +82,12 @@ class TelegramBot:
     def send_signal(self, direction: str, confidence: float, spot: float, phase: str) -> bool:
         """Notifica apertura trade."""
         emoji = "\U0001f7e2" if direction == "LONG" else "\U0001f534"  # green/red circle
+        safe_phase = phase.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         text = (
             f"{emoji} <b>SIGNAL: {direction}</b>\n"
             f"Confidence: {confidence:.1%}\n"
             f"Spot: {spot:.2f}\n"
-            f"Phase: {phase}\n"
+            f"Phase: {safe_phase}\n"
             f"Time: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
         )
         return self._send(text)

@@ -460,7 +460,9 @@ def _normalize_p1lite_record(record: dict[str, Any]) -> dict[str, Any]:
                   "mr1d", "mr1u", "or1d", "or1u"):
         raw_key = field
         # Cerca anche alias (high -> running_high, etc.)
-        val = record.get(raw_key) or record.get(field.replace("running_", ""))
+        val = record.get(raw_key)
+        if val is None:
+            val = record.get(field.replace("running_", ""))
         out[field] = _clean_numeric(val)
 
     out["volume_cumulative"] = _clean_integer(record.get("volume_cumulative") or record.get("volume"))

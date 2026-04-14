@@ -235,10 +235,11 @@ def main():
     # Telegram
     try:
         import requests
+        from src.core.secrets import get_secret as _get_secret
         msg = "P1UNI Boot: " + ", ".join(f"{k}={'OK' if v else 'FAIL'}" for k, v in results.items())
         requests.post(
-            f"https://api.telegram.org/bot{get_secret('TELEGRAM_BOT_TOKEN', '')}/sendMessage",
-            json={"chat_id": get_secret("TELEGRAM_CHAT_ID", ""), "text": msg}, timeout=10
+            f"https://api.telegram.org/bot{_get_secret('TELEGRAM_BOT_TOKEN', '')}/sendMessage",
+            json={"chat_id": _get_secret("TELEGRAM_CHAT_ID", ""), "text": msg}, timeout=10
         )
     except Exception:
         pass
