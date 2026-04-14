@@ -275,12 +275,22 @@ class DatabentoAdapter(BaseAdapter):
     def connect(self) -> None:
         """Connette a Databento Live API.
 
-        IMPORTANTE: usare db.Live(key=api_key), NON db.set_api_key()!
+        IMPORTANTE: chiudere il client precedente prima di riconnettersi
+        per evitare di saturare il connection limit di Databento.
         """
         import databento as db
 
         if not self.api_key:
             raise ConnectionError("databento.api_key non configurato")
+
+        # Chiudi client precedente se esiste (evita connection limit)
+        if self._client is not None:
+            try:
+                self._client.stop()
+            except Exception:
+                pass
+            self._client = None
+            time.sleep(2)  # attendi che la connessione si chiuda sul server
 
         self._log.info(
             f"Connecting to Databento: dataset={self.dataset}, "

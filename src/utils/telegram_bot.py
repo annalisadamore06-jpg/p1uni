@@ -34,20 +34,27 @@ class TelegramBot:
         self.chat_id: str = tg_cfg.get("chat_id", "")
         self.rate_limit_sec: float = tg_cfg.get("rate_limit_sec", 3.0)
         self._last_send: float = 0.0
+        self._consecutive_failures: int = 0
         self.enabled: bool = bool(self.token and self.chat_id)
 
         if not self.enabled:
             logger.warning("Telegram bot disabled: missing token or chat_id")
 
     def _send(self, text: str) -> bool:
-        """Invia un messaggio con rate limiting."""
+        """Invia un messaggio con rate limiting. NON blocca mai il thread."""
         if not self.enabled:
             return False
 
-        # Rate limit
-        elapsed = time.time() - self._last_send
-        if elapsed < self.rate_limit_sec:
-            time.sleep(self.rate_limit_sec - elapsed)
+        # Rate limit: skip se troppo frequente (NON sleep, NON bloccare)
+        now = time.time()
+        if now - self._last_send < self.rate_limit_sec:
+            return False  # skip silenziosamente
+
+        # Se l'ultimo invio ha fallito, aspetta piu' a lungo (backoff)
+        if self._consecutive_failures > 0:
+            backoff = min(60, self.rate_limit_sec * (2 ** self._consecutive_failures))
+            if now - self._last_send < backoff:
+                return False
 
         try:
             url = self.BASE_URL.format(token=self.token)
@@ -55,16 +62,21 @@ class TelegramBot:
                 "chat_id": self.chat_id,
                 "text": text,
                 "parse_mode": "HTML",
-            }, timeout=10)
-            self._last_send = time.time()
+            }, timeout=5)  # timeout ridotto a 5s per non bloccare
+            self._last_send = now
 
             if resp.status_code == 200:
+                self._consecutive_failures = 0
                 return True
             else:
-                logger.error(f"Telegram API error: {resp.status_code} {resp.text}")
+                self._consecutive_failures += 1
+                if self._consecutive_failures <= 2:  # log solo i primi errori
+                    logger.error(f"Telegram API error: {resp.status_code}")
                 return False
         except Exception as e:
-            logger.error(f"Telegram send error: {e}")
+            self._consecutive_failures += 1
+            if self._consecutive_failures <= 2:
+                logger.error(f"Telegram send error: {type(e).__name__}")
             return False
 
     def send_signal(self, direction: str, confidence: float, spot: float, phase: str) -> bool:

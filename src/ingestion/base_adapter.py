@@ -144,8 +144,8 @@ class BaseAdapter(ABC):
     QUEUE_WARN_SIZE: int = 8_000    # Warning Telegram a questo livello
 
     # Auto-reconnect
-    RECONNECT_BASE_SEC: float = 1.0
-    RECONNECT_MAX_SEC: float = 60.0
+    RECONNECT_BASE_SEC: float = 5.0    # start higher to avoid connection flooding
+    RECONNECT_MAX_SEC: float = 120.0   # max 2 min between retries
 
     # Retry scrittura DB
     DB_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0)
@@ -187,6 +187,10 @@ class BaseAdapter(ABC):
         # Stato
         self._running: bool = False
         self._shutdown_event = threading.Event()
+
+        # Alert rate limiting: max 1 alert ogni 5 minuti per adapter
+        self._last_alert_time: float = 0.0
+        self._alert_cooldown_sec: float = 300.0  # 5 minuti
 
         # Path quarantena file
         base_dir = Path(config.get("_base_dir", "."))
@@ -522,12 +526,17 @@ class BaseAdapter(ABC):
     # ============================================================
 
     def _send_alert(self, message: str, level: str = "WARNING") -> None:
-        """Invia alert Telegram se disponibile."""
-        if self.telegram is not None:
-            try:
-                self.telegram.send_alert(message, level)
-            except Exception:
-                pass  # non crashare per un alert fallito
+        """Invia alert Telegram con rate limiting (max 1 ogni 5 min per adapter)."""
+        if self.telegram is None:
+            return
+        now = time.time()
+        if now - self._last_alert_time < self._alert_cooldown_sec:
+            return  # skip: troppo presto dall'ultimo alert
+        self._last_alert_time = now
+        try:
+            self.telegram.send_alert(message, level)
+        except Exception:
+            pass
 
     # ============================================================
     # Stats per monitoring
