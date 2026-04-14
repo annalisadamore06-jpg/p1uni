@@ -503,9 +503,8 @@ class SignalEngine:
         """Finalizza la decisione: logga, registra audit trail."""
         rec.elapsed_ms = (time.perf_counter() - t0) * 1000
 
-        level = "DEBUG" if rec.action_taken == "SKIP" else "INFO"
-        log_fn = logger.debug if level == "DEBUG" else logger.info
-        log_fn(
+        # SEMPRE INFO per le decisioni (serve per monitoring)
+        logger.info(
             f"Decision: {rec.action_taken} | signal={rec.signal} conf={rec.confidence:.3f} "
             f"phase={rec.phase} step={rec.step_reached}/6 | {rec.reason} "
             f"[{rec.elapsed_ms:.1f}ms]"
