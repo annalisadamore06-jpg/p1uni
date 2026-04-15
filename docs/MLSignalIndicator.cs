@@ -82,10 +82,17 @@ namespace NinjaTrader.NinjaScript.Indicators
             catch { /* Ignora errori file lock temporanei */ }
 
             // === GEX DATA ===
-            double cw     = GetDouble(data["call_wall"]);
-            double pw     = GetDouble(data["put_wall"]);
-            double zg     = GetDouble(data["zero_gamma"]);
-            string regime = data["gex_regime"] != null ? data["gex_regime"].ToString() : "neutral";
+            // BUG1 FIX: livelli nested sotto gex_levels, fallback a root per compatibilità
+            JObject gexLevels = data["gex_levels"] as JObject;
+            double cw = gexLevels != null ? GetDouble(gexLevels["call_wall"])  : GetDouble(data["call_wall"]);
+            double pw = gexLevels != null ? GetDouble(gexLevels["put_wall"])   : GetDouble(data["put_wall"]);
+            double zg = gexLevels != null ? GetDouble(gexLevels["zero_gamma"]) : GetDouble(data["zero_gamma"]);
+
+            // BUG2 FIX: cerca "gex_regime" e "regime", mappa POSITIVE_GAMMA→positive, NEGATIVE_GAMMA→negative
+            string regimeRaw = (data["gex_regime"] ?? data["regime"])?.ToString() ?? "neutral";
+            string regime = regimeRaw == "POSITIVE_GAMMA" ? "positive" :
+                            regimeRaw == "NEGATIVE_GAMMA" ? "negative" :
+                            regimeRaw;
             string mode   = data["mode"] != null ? data["mode"].ToString() : "?";
 
             // ==========================================================
