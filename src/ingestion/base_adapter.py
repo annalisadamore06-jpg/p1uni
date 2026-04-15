@@ -144,7 +144,7 @@ class BaseAdapter(ABC):
     QUEUE_WARN_SIZE: int = 8_000    # Warning Telegram a questo livello
 
     # Auto-reconnect
-    RECONNECT_BASE_SEC: float = 5.0    # start higher to avoid connection flooding
+    RECONNECT_BASE_SEC: float = 15.0   # 15s iniziali: tempo sufficiente per cleanup server Databento
     RECONNECT_MAX_SEC: float = 120.0   # max 2 min between retries
 
     # Retry scrittura DB
@@ -232,7 +232,16 @@ class BaseAdapter(ABC):
         """Avvia l'adapter: listener thread + batch writer thread.
 
         Chiamare da main.py. Non blocca (avvia 2 daemon thread).
+        Idempotente: se gia' in esecuzione, non crea thread duplicati.
         """
+        # Guard: _run_adapter in main.py chiama start() ogni 10s in loop
+        # perche' start() e' non-bloccante. Senza questo guard, ogni chiamata
+        # crea nuovi thread listener che aprono connessioni Databento duplicate
+        # → "User has reached their open connection limit".
+        if self._running:
+            self._log.debug(f"Adapter '{self.adapter_name}' already running, ignoring duplicate start()")
+            return
+
         self._running = True
         self._shutdown_event.clear()
 

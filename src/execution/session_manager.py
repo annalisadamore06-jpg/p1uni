@@ -67,11 +67,16 @@ PHASE_ACTIVE_LEVELS: dict[MarketPhase, list[str]] = {
 }
 
 # Confidence override per fase
+# NOTA: scala confidence = abs(avg_proba - 0.5) * 2  (range 0.0 - 1.0)
+#   0.20 = WEAK_SIGNAL   (avg_proba 0.60, WR 72.5%) — minimo accettabile
+#   0.30 = NORMAL_SIGNAL (avg_proba 0.65, WR 75.9%) — conservativo
+#   0.40 = STRONG_SIGNAL (avg_proba 0.70, WR 79.7%) — molto conservativo
+#   0.50 = SUPER_SIGNAL  (avg_proba 0.75, WR 84.6%) — solo i migliori
 PHASE_MIN_CONFIDENCE: dict[MarketPhase, float] = {
-    MarketPhase.NIGHT_EARLY: 0.75,   # molto conservativo
-    MarketPhase.NIGHT_FULL: 0.70,    # conservativo
-    MarketPhase.MORNING_EU: 0.60,    # standard
-    MarketPhase.AFTERNOON_US: 0.60,  # standard
+    MarketPhase.NIGHT_EARLY: 0.40,   # conservativo di notte (STRONG_SIGNAL)
+    MarketPhase.NIGHT_FULL: 0.30,    # notte piena (NORMAL_SIGNAL)
+    MarketPhase.MORNING_EU: 0.20,    # mattina EU (WEAK_SIGNAL accettato)
+    MarketPhase.AFTERNOON_US: 0.20,  # pomeriggio US (WEAK_SIGNAL accettato)
     MarketPhase.HALT: 1.0,           # nessun trade
     MarketPhase.WEEKEND: 1.0,        # nessun trade
 }

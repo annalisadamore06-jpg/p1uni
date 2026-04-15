@@ -12,12 +12,12 @@ ARCHITECTURE:
   Gates:  4 risk gates from Live Readiness Certification autopsy
   Output: Signal direction (UP/DOWN) + confidence + signal class
 
-SIGNAL CLASSES:
-  SUPER_SIGNAL:  conf >= 0.75  →  Full position  (84.6% WR, 383 OOS trades)
-  STRONG_SIGNAL: conf >= 0.70  →  3/4 position   (79.7% WR, 782 OOS trades)
-  NORMAL_SIGNAL: conf >= 0.65  →  1/2 position   (75.9% WR, 1134 OOS trades)
-  WEAK_SIGNAL:   conf >= 0.60  →  1/4 position   (72.5% WR, 1540 OOS trades)
-  NO_TRADE:      conf <  0.60  →  Pass
+SIGNAL CLASSES (confidence = abs(avg_proba - 0.5) * 2, rescaled 0-1):
+  SUPER_SIGNAL:  conf >= 0.50 (avg_proba>=0.75) → Full position  (84.6% WR, 383 OOS trades)
+  STRONG_SIGNAL: conf >= 0.40 (avg_proba>=0.70) → 3/4 position   (79.7% WR, 782 OOS trades)
+  NORMAL_SIGNAL: conf >= 0.30 (avg_proba>=0.65) → 1/2 position   (75.9% WR, 1134 OOS trades)
+  WEAK_SIGNAL:   conf >= 0.20 (avg_proba>=0.60) → 1/4 position   (72.5% WR, 1540 OOS trades)
+  NO_TRADE:      conf <  0.20 (avg_proba< 0.60) → Pass
 
 RISK GATES (from destructive test autopsy):
   TIME_GATE:      Block 03-07 UTC and 22-23 UTC (100% loss zones)
@@ -49,11 +49,11 @@ log = logging.getLogger("v35_live")
 
 
 class SignalClass(Enum):
-    SUPER_SIGNAL = "SUPER_SIGNAL"     # conf >= 0.75
-    STRONG_SIGNAL = "STRONG_SIGNAL"   # conf >= 0.70
-    NORMAL_SIGNAL = "NORMAL_SIGNAL"   # conf >= 0.65
-    WEAK_SIGNAL = "WEAK_SIGNAL"       # conf >= 0.60
-    NO_TRADE = "NO_TRADE"             # conf <  0.60
+    SUPER_SIGNAL = "SUPER_SIGNAL"     # conf >= 0.50 (avg_proba >= 0.75)
+    STRONG_SIGNAL = "STRONG_SIGNAL"   # conf >= 0.40 (avg_proba >= 0.70)
+    NORMAL_SIGNAL = "NORMAL_SIGNAL"   # conf >= 0.30 (avg_proba >= 0.65)
+    WEAK_SIGNAL = "WEAK_SIGNAL"       # conf >= 0.20 (avg_proba >= 0.60)
+    NO_TRADE = "NO_TRADE"             # conf <  0.20 (avg_proba <  0.60)
 
 
 @dataclass
@@ -240,11 +240,17 @@ class V35ProductionEngine:
     """
 
     # Confidence → Signal class mapping
+    # confidence = abs(avg_proba - 0.5) * 2  (rescaled 0-1 range)
+    # Thresholds below are on the RESCALED scale (NOT raw avg_proba):
+    #   0.50 = avg_proba 0.75 → SUPER   (84.6% WR, 383 OOS trades)
+    #   0.40 = avg_proba 0.70 → STRONG  (79.7% WR, 782 OOS trades)
+    #   0.30 = avg_proba 0.65 → NORMAL  (75.9% WR, 1134 OOS trades)
+    #   0.20 = avg_proba 0.60 → WEAK    (72.5% WR, 1540 OOS trades)
     THRESHOLDS = [
-        (0.75, SignalClass.SUPER_SIGNAL, 1.0),
-        (0.70, SignalClass.STRONG_SIGNAL, 0.75),
-        (0.65, SignalClass.NORMAL_SIGNAL, 0.50),
-        (0.60, SignalClass.WEAK_SIGNAL, 0.25),
+        (0.50, SignalClass.SUPER_SIGNAL, 1.0),    # avg_proba >= 0.75
+        (0.40, SignalClass.STRONG_SIGNAL, 0.75),  # avg_proba >= 0.70
+        (0.30, SignalClass.NORMAL_SIGNAL, 0.50),  # avg_proba >= 0.65
+        (0.20, SignalClass.WEAK_SIGNAL, 0.25),    # avg_proba >= 0.60
     ]
 
     def __init__(self, models_dir: Path = MODELS_DIR, enable_gates: bool = True):
@@ -330,7 +336,8 @@ class V35ProductionEngine:
         signal_class = SignalClass.NO_TRADE
         position_size = 0.0
         for thr, cls, size in self.THRESHOLDS:
-            if confidence >= (thr - 0.5) * 2:
+            # thr is on rescaled confidence scale (0-1), direct comparison
+            if confidence >= thr:
                 signal_class = cls
                 position_size = size
                 break

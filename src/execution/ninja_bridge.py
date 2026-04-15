@@ -1,41 +1,39 @@
 """
-NinjaTrader Bridge - Comunicazione bidirezionale con NinjaTrader 8 via ZMQ.
+NinjaTrader Bridge — TCP Server compatibile con MLAutoStrategy_P1.cs
 
-ARCHITETTURA:
-  Python (Signal Engine)                  NinjaTrader 8 (C#)
-         |                                      |
-    [REQ socket] ----> tcp://5555 ----> [REP socket]  (comandi)
-         |    JSON: {action, qty, sl, tp}        |
-         |    <---- ACK/NACK ----                |
-         |                                      |
-    [SUB socket] <--- tcp://5556 <--- [PUB socket]  (eventi)
-         |    JSON: {event, data}                |
+ARCHITETTURA (CORRETTA):
+  Python (TCP SERVER)  <─── NT8 (TCP CLIENT) connects
+         |                        |
+  binds 127.0.0.1:5555           connects to 5555
+  sends JSON lines               reads JSON lines
+                                 executes trades
+                                 sends events back
 
-MODALITA:
-  - LIVE: ZMQ reale verso NT8
-  - PAPER: Simulazione locale (nessun ZMQ, ordini riempiti istantaneamente)
+PROTOCOLLO (JSON newline-delimited):
+  Python → NT8:
+    {"type": "HEARTBEAT", "timestamp": "..."}
+    {"side": "LONG",  "confidence": 0.65, "signal_id": "abc123"}
+    {"side": "SHORT", "confidence": 0.65, "signal_id": "def456"}
+    {"side": "FLATTEN","signal_id": "ghi789"}
 
-SICUREZZA:
-  - Ogni azione loggata
-  - Timeout 5s su ACK
-  - Retry 3x su timeout
-  - Alert Telegram se disconnesso con posizione aperta
-  - Reconnect esponenziale
+  NT8 → Python (opzionale):
+    {"type": "FILL",  "side": "LONG",  "qty": 1, "price": 5450.0}
+    {"type": "FLAT",  "pnl": 12.5}
 
-CONFIGURAZIONE (settings.yaml):
-  execution:
-    bridge_host: "127.0.0.1"
-    bridge_port: 5555           # comandi (REQ/REP)
-    event_port: 5556            # eventi (PUB/SUB)
-    ack_timeout_sec: 5
-    max_retries: 3
-    heartbeat_interval_sec: 30
+NOTES:
+  - Fire-and-forget: Python sends signal, non attende ACK
+  - NT8 gestisce SL/TP dai livelli P1-Lite/GEX interni
+  - L'unico dato critico che NT8 accetta da Python: side + confidence + signal_id
+
+PAPER MODE:
+  Simula localmente senza ZMQ/TCP.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import socket
 import threading
 import time
 import uuid
@@ -46,7 +44,7 @@ logger = logging.getLogger("p1uni.execution.ninja_bridge")
 
 
 # ============================================================
-# Position state
+# Position state (thread-safe)
 # ============================================================
 
 class PositionState:
@@ -57,7 +55,7 @@ class PositionState:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self.side: str = "FLAT"  # FLAT, LONG, SHORT
+        self.side: str = "FLAT"
         self.size: int = 0
         self.entry_price: float = 0.0
         self.unrealized_pnl: float = 0.0
@@ -101,10 +99,13 @@ class PositionState:
 # ============================================================
 
 class NinjaTraderBridge:
-    """Ponte di comunicazione bidirezionale con NinjaTrader 8.
+    """
+    Ponte Python ↔ NinjaTrader 8.
 
-    Supporta modalita LIVE (ZMQ) e PAPER (simulazione locale).
-    Thread-safe. Gestisce invio ordini, ascolto eventi, tracking posizione.
+    LIVE mode: TCP server che attende la connessione del NinjaScript.
+    Invia segnali come JSON newline-delimited (fire-and-forget).
+
+    PAPER mode: Simulazione locale, nessun TCP.
     """
 
     def __init__(self, config: dict[str, Any], telegram: Any = None) -> None:
@@ -113,10 +114,7 @@ class NinjaTraderBridge:
 
         self.host: str = exec_cfg.get("bridge_host", "127.0.0.1")
         self.cmd_port: int = int(exec_cfg.get("bridge_port", 5555))
-        self.event_port: int = int(exec_cfg.get("event_port", 5556))
-        self.ack_timeout_ms: int = int(exec_cfg.get("ack_timeout_sec", 5)) * 1000
-        self.max_retries: int = int(exec_cfg.get("max_retries", 3))
-        self.heartbeat_interval: int = int(exec_cfg.get("heartbeat_interval_sec", 5))
+        self.heartbeat_interval: int = int(exec_cfg.get("heartbeat_interval_sec", 25))
 
         self.paper_mode: bool = sys_cfg.get("mode", "paper") == "paper"
         self.telegram = telegram
@@ -127,11 +125,10 @@ class NinjaTraderBridge:
         self._running: bool = False
         self._shutdown_event = threading.Event()
 
-        # ZMQ (lazy init, solo in LIVE mode)
-        self._zmq_context: Any = None
-        self._cmd_socket: Any = None
-        self._event_socket: Any = None
-        self._cmd_lock = threading.Lock()  # serializza invio comandi
+        # TCP server / client
+        self._server_sock: socket.socket | None = None
+        self._client_sock: socket.socket | None = None
+        self._client_lock = threading.Lock()
 
         # Event callbacks
         self._event_handlers: dict[str, list[Callable]] = {}
@@ -143,7 +140,6 @@ class NinjaTraderBridge:
         self.orders_sent: int = 0
         self.orders_filled: int = 0
         self.orders_rejected: int = 0
-        self.orders_timed_out: int = 0
 
         mode_str = "PAPER" if self.paper_mode else "LIVE"
         logger.info(f"NinjaTraderBridge initialized in {mode_str} mode")
@@ -153,7 +149,7 @@ class NinjaTraderBridge:
     # ============================================================
 
     def start(self) -> None:
-        """Avvia il bridge: connessione ZMQ (live) o init paper."""
+        """Avvia il bridge: TCP server (live) o init paper."""
         self._running = True
 
         if self.paper_mode:
@@ -161,78 +157,216 @@ class NinjaTraderBridge:
             self._connected = True
             return
 
-        # LIVE: inizializza ZMQ
-        self._connect_zmq()
-
-        # Thread per ascolto eventi
-        self._event_thread = threading.Thread(
-            target=self._listen_events, name="nt8-events", daemon=True
-        )
-        self._event_thread.start()
-
-        # Thread per heartbeat
-        self._hb_thread = threading.Thread(
-            target=self._heartbeat_loop, name="nt8-heartbeat", daemon=True
-        )
-        self._hb_thread.start()
-
-    def _connect_zmq(self) -> None:
-        """Inizializza contesto e socket ZMQ."""
+        # LIVE: TCP server che attende NT8
         try:
-            import zmq
-            self._zmq_context = zmq.Context()
-
-            # Socket comandi (REQ)
-            self._cmd_socket = self._zmq_context.socket(zmq.REQ)
-            self._cmd_socket.setsockopt(zmq.RCVTIMEO, self.ack_timeout_ms)
-            self._cmd_socket.setsockopt(zmq.SNDTIMEO, self.ack_timeout_ms)
-            self._cmd_socket.setsockopt(zmq.LINGER, 0)
-            cmd_addr = f"tcp://{self.host}:{self.cmd_port}"
-            self._cmd_socket.connect(cmd_addr)
-
-            # Socket eventi (SUB)
-            self._event_socket = self._zmq_context.socket(zmq.SUB)
-            self._event_socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1s poll
-            self._event_socket.setsockopt_string(zmq.SUBSCRIBE, "")  # ricevi tutto
-            event_addr = f"tcp://{self.host}:{self.event_port}"
-            self._event_socket.connect(event_addr)
-
-            self._connected = True
-            logger.info(f"ZMQ connected: cmd={cmd_addr}, events={event_addr}")
-
+            self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._server_sock.bind((self.host, self.cmd_port))
+            self._server_sock.listen(1)
+            self._server_sock.settimeout(5.0)  # timeout per accept loop
+            logger.info(f"TCP Server bound on {self.host}:{self.cmd_port} — waiting for NT8 connection...")
         except Exception as e:
-            self._connected = False
-            logger.error(f"ZMQ connection failed: {e}")
-            raise ConnectionError(f"ZMQ init failed: {e}") from e
+            logger.error(f"TCP server bind failed on {self.host}:{self.cmd_port}: {e}")
+            raise
+
+        # Thread: accetta connessioni NT8
+        threading.Thread(
+            target=self._accept_loop, name="nt8-accept", daemon=True
+        ).start()
+
+        # Thread: heartbeat periodico
+        threading.Thread(
+            target=self._heartbeat_loop, name="nt8-heartbeat", daemon=True
+        ).start()
 
     def stop(self) -> None:
         """Shutdown ordinato."""
         logger.info("Stopping NinjaTraderBridge...")
         self._running = False
         self._shutdown_event.set()
-        self._close_zmq()
-        logger.info("NinjaTraderBridge stopped")
-
-    def _close_zmq(self) -> None:
-        """Chiude socket e contesto ZMQ."""
-        for sock in (self._cmd_socket, self._event_socket):
-            if sock is not None:
+        with self._client_lock:
+            if self._client_sock is not None:
                 try:
-                    sock.close()
+                    self._client_sock.close()
                 except Exception:
                     pass
-        if self._zmq_context is not None:
+                self._client_sock = None
+        if self._server_sock is not None:
             try:
-                self._zmq_context.term()
+                self._server_sock.close()
             except Exception:
                 pass
-        self._cmd_socket = None
-        self._event_socket = None
-        self._zmq_context = None
+            self._server_sock = None
         self._connected = False
+        logger.info("NinjaTraderBridge stopped")
 
     # ============================================================
-    # Invio Ordini
+    # TCP Server: accept loop
+    # ============================================================
+
+    def _accept_loop(self) -> None:
+        """Thread: accetta connessioni TCP da NT8."""
+        while self._running:
+            try:
+                if self._server_sock is None:
+                    break
+                try:
+                    conn, addr = self._server_sock.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    # Server socket chiuso
+                    break
+
+                # Configura la connessione client
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                conn.settimeout(None)  # blocking per recv
+
+                with self._client_lock:
+                    # Chiudi vecchia connessione se presente
+                    if self._client_sock is not None:
+                        try:
+                            self._client_sock.close()
+                        except Exception:
+                            pass
+                    self._client_sock = conn
+                    self._connected = True
+
+                logger.info(f"NT8 connected from {addr[0]}:{addr[1]}")
+                self._send_alert("✅ NinjaTrader 8 connesso a P1UNI", "INFO")
+
+                # Thread: ricevi eventi da NT8
+                threading.Thread(
+                    target=self._recv_loop, args=(conn,), name="nt8-recv", daemon=True
+                ).start()
+
+            except Exception as e:
+                if self._running:
+                    logger.error(f"Accept loop error: {e}")
+                time.sleep(1)
+
+    # ============================================================
+    # TCP receive loop (events from NT8)
+    # ============================================================
+
+    def _recv_loop(self, conn: socket.socket) -> None:
+        """Thread: ricevi eventi da NT8 sulla connessione attiva."""
+        buf = b""
+        while self._running:
+            try:
+                data = conn.recv(4096)
+                if not data:
+                    # Connessione chiusa da NT8
+                    logger.warning("NT8 disconnected (connection closed)")
+                    break
+                buf += data
+                # Parse newline-delimited JSON
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line = line.strip()
+                    if line:
+                        try:
+                            event = json.loads(line.decode("utf-8", errors="ignore"))
+                            self._handle_nt8_event(event)
+                        except json.JSONDecodeError:
+                            logger.debug(f"NT8 non-JSON: {line[:100]}")
+            except OSError:
+                break
+            except Exception as e:
+                logger.debug(f"Recv error: {e}")
+                break
+
+        # Connessione persa
+        with self._client_lock:
+            if self._client_sock is conn:
+                self._client_sock = None
+                self._connected = False
+        logger.warning("NT8 connection lost — waiting for reconnect...")
+        self._send_alert("⚠️ NT8 disconnesso da P1UNI — attesa riconnessione", "WARNING")
+
+    def _handle_nt8_event(self, event: dict[str, Any]) -> None:
+        """Processa un evento ricevuto da NT8."""
+        etype = event.get("type", "UNKNOWN")
+        logger.info(f"NT8 event: {etype} → {event}")
+
+        if etype == "FILL":
+            side = event.get("side", "")
+            qty = int(event.get("qty", 0))
+            price = float(event.get("price", 0))
+            order_id = event.get("order_id", "")
+            if side and price > 0:
+                self.position.update(side, qty, price, order_id)
+                self.orders_filled += 1
+                logger.info(f"Position updated: {side} x{qty} @ {price}")
+
+        elif etype in ("FLAT", "FLATTEN"):
+            pnl = float(event.get("pnl", 0))
+            self.position.flatten()
+            logger.info(f"Position FLAT (pnl={pnl:.2f})")
+
+        elif etype == "ACCOUNT":
+            daily_pnl = event.get("daily_pnl", 0)
+            logger.info(f"Account update: daily_pnl={daily_pnl}")
+
+        # Dispatch ai handler registrati
+        self._dispatch_event(etype, event)
+
+    # ============================================================
+    # Heartbeat
+    # ============================================================
+
+    def _heartbeat_loop(self) -> None:
+        """Thread: invia HEARTBEAT a NT8 ogni heartbeat_interval secondi.
+
+        Se NT8 non riceve heartbeat per 30s, disabilita il trading lato NT8.
+        """
+        while self._running and not self._shutdown_event.is_set():
+            self._shutdown_event.wait(self.heartbeat_interval)
+            if not self._running:
+                break
+
+            hb = {
+                "type": "HEARTBEAT",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            ok = self._send_to_nt8(hb)
+            if ok:
+                if not self._connected:
+                    logger.info("NT8 heartbeat OK — connection restored")
+                self._connected = True
+            else:
+                if self._connected:
+                    logger.warning("NT8 heartbeat failed — connection may be lost")
+                # Don't set _connected=False here: let _recv_loop handle it
+
+    # ============================================================
+    # Send to NT8
+    # ============================================================
+
+    def _send_to_nt8(self, msg: dict[str, Any]) -> bool:
+        """Invia un messaggio JSON a NT8 (thread-safe, fire-and-forget).
+
+        Aggiunge newline come delimitatore (NT8 usa readline).
+
+        Returns:
+            True se inviato con successo, False se NT8 non connesso.
+        """
+        try:
+            data = (json.dumps(msg) + "\n").encode("utf-8")
+            with self._client_lock:
+                if self._client_sock is None:
+                    return False
+                self._client_sock.sendall(data)
+            return True
+        except Exception as e:
+            logger.debug(f"NT8 send failed: {e}")
+            with self._client_lock:
+                self._client_sock = None
+                self._connected = False
+            return False
+
+    # ============================================================
+    # Ordini
     # ============================================================
 
     def send_order(
@@ -242,341 +376,171 @@ class NinjaTraderBridge:
         sl: float,
         tp: float,
         price: float = 0.0,
+        raw_probability: float = 0.0,
     ) -> dict[str, Any]:
-        """Invia un ordine a NinjaTrader.
+        """Invia un segnale di trading a NinjaTrader.
 
         Args:
             signal_type: "LONG" o "SHORT"
-            size: Numero contratti
-            sl: Stop loss
-            tp: Take profit
-            price: Prezzo corrente (per paper mode e logging)
+            size: Numero contratti (usato in paper mode; NT8 gestisce la size internamente)
+            sl: Stop loss (informativo; NT8 usa i suoi livelli P1-Lite)
+            tp: Take profit (informativo; NT8 usa i suoi livelli P1-Lite)
+            price: Prezzo corrente (per logging)
+            raw_probability: avg_proba grezza dal modello (0-1). Usata come confidence per NT8.
 
         Returns:
             Dict con risultato: {success, order_id, fill_price, message}
         """
         order_id = str(uuid.uuid4())[:8]
-        action = "BUY" if signal_type == "LONG" else "SELL"
+        side = "LONG" if signal_type == "LONG" else "SHORT"
+
+        # NT8 usa confidence come "forza del segnale" su scala 0.50-1.0.
+        # raw_probability è avg_proba del modello (0-1), che per SHORT è < 0.5.
+        # Convertiamo a "distanza simmetrica da 0.5" → scala 0.5-1.0 indipendente dalla direzione:
+        #   abs(raw_proba - 0.5) + 0.5
+        #   Es: raw=0.35 (SHORT WEAK) → 0.15+0.5 = 0.65 → sopra MIN_CONFIDENCE=0.60 ✅
+        #   Es: raw=0.65 (LONG WEAK)  → 0.15+0.5 = 0.65 → sopra MIN_CONFIDENCE=0.60 ✅
+        # Fallback: 0.62 (appena sopra soglia NT8)
+        if raw_probability > 0:
+            confidence_for_nt8 = abs(raw_probability - 0.5) + 0.5
+        else:
+            confidence_for_nt8 = 0.62
 
         msg = {
-            "action": action,
-            "qty": size,
-            "sl": sl,
-            "tp": tp,
-            "price": price,
-            "order_id": order_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "side": side,
+            "confidence": round(confidence_for_nt8, 4),
+            "signal_id": order_id,
+            "sl_hint": round(sl, 2),   # informativo
+            "tp_hint": round(tp, 2),   # informativo
+            "entry_price": round(price, 2),
         }
 
         logger.info(
-            f"{'[PAPER] ' if self.paper_mode else ''}Sending order: "
-            f"{action} x{size} SL={sl} TP={tp} price={price} id={order_id}"
+            f"{'[PAPER] ' if self.paper_mode else ''}Sending signal: "
+            f"{side} conf={confidence_for_nt8:.3f} price={price:.2f} id={order_id}"
         )
         self.orders_sent += 1
 
         if self.paper_mode:
             return self._paper_execute(msg)
+
+        if not self._connected:
+            logger.warning("NT8 not connected — signal queued/dropped")
+            return {
+                "success": False,
+                "order_id": order_id,
+                "message": "NT8 not connected (strategy offline or NinjaTrader not running)",
+            }
+
+        ok = self._send_to_nt8(msg)
+        if ok:
+            # Fire-and-forget: assume optimistic success
+            # Position update will come via NT8 event (FILL) if strategy responds
+            logger.info(f"Signal sent to NT8: {side} id={order_id}")
+            return {
+                "success": True,
+                "order_id": order_id,
+                "fill_price": price,
+                "message": "Signal sent to NT8 (fire-and-forget)",
+            }
         else:
-            return self._zmq_send_with_retry(msg)
+            logger.error(f"Failed to send signal to NT8: {side} id={order_id}")
+            self._send_alert(
+                f"❌ Segnale NT8 FALLITO: {side} conf={confidence_for_nt8:.2f}",
+                "ERROR",
+            )
+            return {
+                "success": False,
+                "order_id": order_id,
+                "message": "Send to NT8 failed",
+            }
 
     def cancel_all(self) -> dict[str, Any]:
-        """Invia comando per cancellare tutti gli ordini e chiudere posizioni."""
+        """Invia comando FLATTEN a NT8 (chiude tutte le posizioni)."""
         msg = {
-            "action": "FLATTEN",
-            "order_id": str(uuid.uuid4())[:8],
+            "side": "FLATTEN",
+            "signal_id": str(uuid.uuid4())[:8],
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-
-        logger.warning(f"{'[PAPER] ' if self.paper_mode else ''}CANCEL ALL / FLATTEN")
+        logger.warning(f"{'[PAPER] ' if self.paper_mode else ''}FLATTEN ALL")
 
         if self.paper_mode:
             self.position.flatten()
             return {"success": True, "message": "[PAPER] All positions flattened"}
 
-        return self._zmq_send_with_retry(msg)
+        ok = self._send_to_nt8(msg)
+        if ok:
+            return {"success": True, "message": "FLATTEN sent to NT8"}
+        else:
+            return {"success": False, "message": "FLATTEN send failed (NT8 not connected)"}
 
     # ============================================================
-    # ZMQ send with retry
-    # ============================================================
-
-    def _zmq_send_with_retry(self, msg: dict[str, Any]) -> dict[str, Any]:
-        """Invia messaggio via ZMQ con retry esponenziale."""
-        import zmq
-
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                with self._cmd_lock:
-                    if self._cmd_socket is None:
-                        return {"success": False, "message": "ZMQ not connected"}
-
-                    # Invia
-                    self._cmd_socket.send_json(msg)
-                    logger.debug(f"ZMQ sent (attempt {attempt}): {msg['action']} id={msg['order_id']}")
-
-                    # Attendi ACK
-                    response = self._cmd_socket.recv_json()
-
-                    if response.get("status") == "ACK":
-                        fill_price = response.get("fill_price", msg.get("price", 0))
-                        self._on_order_acked(msg, response)
-                        return {
-                            "success": True,
-                            "order_id": msg["order_id"],
-                            "fill_price": fill_price,
-                            "message": "ACK received",
-                        }
-                    elif response.get("status") == "NACK":
-                        reason = response.get("reason", "Unknown")
-                        logger.warning(f"Order NACK: {reason}")
-                        self.orders_rejected += 1
-                        return {
-                            "success": False,
-                            "order_id": msg["order_id"],
-                            "message": f"NACK: {reason}",
-                        }
-
-            except zmq.Again:
-                # Timeout
-                self.orders_timed_out += 1
-                logger.warning(
-                    f"ZMQ timeout (attempt {attempt}/{self.max_retries}). "
-                    f"Recreating socket..."
-                )
-                self._reconnect_cmd_socket()
-                if attempt < self.max_retries:
-                    time.sleep(attempt)  # backoff
-
-            except Exception as e:
-                logger.error(f"ZMQ send error: {e}")
-                self._reconnect_cmd_socket()
-                if attempt < self.max_retries:
-                    time.sleep(attempt)
-
-        # Tutti i retry falliti
-        error_msg = f"Order FAILED after {self.max_retries} retries"
-        logger.error(error_msg)
-        self._send_alert(
-            f"ORDINE FALLITO: {msg['action']} x{msg.get('qty')} dopo {self.max_retries} tentativi!",
-            "ERROR",
-        )
-
-        # Se abbiamo posizioni aperte e siamo disconnessi: CRITICO
-        if not self.position.is_flat:
-            self._send_alert(
-                "DISCONNESSO DA NT8 CON POSIZIONE APERTA! Verificare manualmente!",
-                "ERROR",
-            )
-
-        return {"success": False, "order_id": msg["order_id"], "message": error_msg}
-
-    def _reconnect_cmd_socket(self) -> None:
-        """Ricostruisci il socket REQ (necessario dopo timeout in ZMQ REQ)."""
-        try:
-            import zmq
-            if self._cmd_socket is not None:
-                self._cmd_socket.close()
-            self._cmd_socket = self._zmq_context.socket(zmq.REQ)
-            self._cmd_socket.setsockopt(zmq.RCVTIMEO, self.ack_timeout_ms)
-            self._cmd_socket.setsockopt(zmq.SNDTIMEO, self.ack_timeout_ms)
-            self._cmd_socket.setsockopt(zmq.LINGER, 0)
-            self._cmd_socket.connect(f"tcp://{self.host}:{self.cmd_port}")
-        except Exception as e:
-            logger.error(f"CMD socket reconnect failed: {e}")
-            self._cmd_socket = None
-
-    def _on_order_acked(self, msg: dict[str, Any], response: dict[str, Any]) -> None:
-        """Aggiorna stato dopo ACK."""
-        action = msg.get("action", "")
-        fill_price = response.get("fill_price", msg.get("price", 0))
-
-        if action in ("BUY", "SELL"):
-            side = "LONG" if action == "BUY" else "SHORT"
-            self.position.update(side, msg.get("qty", 1), fill_price, msg.get("order_id", ""))
-            self.orders_filled += 1
-            logger.info(f"Order FILLED: {side} x{msg.get('qty')} @ {fill_price}")
-
-        elif action == "FLATTEN":
-            self.position.flatten()
-            logger.info("Position FLATTENED")
-
-    # ============================================================
-    # Paper Mode execution
+    # Paper Mode
     # ============================================================
 
     def _paper_execute(self, msg: dict[str, Any]) -> dict[str, Any]:
-        """Simula l'esecuzione in paper mode."""
-        action = msg.get("action", "")
-        price = msg.get("price", self._paper_last_price)
-        qty = msg.get("qty", 1)
-        order_id = msg.get("order_id", "")
+        """Simula esecuzione in paper mode."""
+        side = msg.get("side", "")
+        price = msg.get("entry_price", self._paper_last_price)
+        order_id = msg.get("signal_id", "")
 
-        if action in ("BUY", "SELL"):
-            side = "LONG" if action == "BUY" else "SHORT"
-            self.position.update(side, qty, price, order_id)
+        if side in ("LONG", "SHORT"):
+            self.position.update(side, 1, price, order_id)
             self.orders_filled += 1
-
-            logger.info(f"[PAPER] Order FILLED: {side} x{qty} @ {price}")
-
-            # Genera evento finto
+            logger.info(f"[PAPER] Signal 'filled': {side} @ {price}")
             self._dispatch_event("ORDER_FILLED", {
-                "order_id": order_id,
                 "side": side,
-                "qty": qty,
+                "qty": 1,
                 "fill_price": price,
+                "order_id": order_id,
             })
-
             return {
                 "success": True,
                 "order_id": order_id,
                 "fill_price": price,
                 "message": "[PAPER] Filled instantly",
             }
-
-        elif action == "FLATTEN":
+        elif side == "FLATTEN":
             self.position.flatten()
             self._dispatch_event("POSITION_UPDATED", {"side": "FLAT", "size": 0})
-            return {"success": True, "message": "[PAPER] Flattened"}
+            return {"success": True, "order_id": order_id, "message": "[PAPER] Flattened"}
 
-        return {"success": False, "message": f"Unknown action: {action}"}
+        return {"success": False, "message": f"Unknown side: {side}"}
 
     def set_paper_price(self, price: float) -> None:
         """Aggiorna il prezzo simulato per paper mode."""
         self._paper_last_price = price
 
     # ============================================================
-    # Event listener (LIVE mode)
+    # Events
     # ============================================================
 
-    def _listen_events(self) -> None:
-        """Thread: ascolta eventi da NT8 via SUB socket."""
-        logger.info("Event listener started")
-
-        while self._running and not self._shutdown_event.is_set():
-            try:
-                if self._event_socket is None:
-                    time.sleep(1)
-                    continue
-
-                msg = self._event_socket.recv_json()
-                self._handle_event(msg)
-
-            except Exception:
-                # Timeout recv (zmq.Again) o errore — continua
-                continue
-
-        logger.info("Event listener stopped")
-
-    def _handle_event(self, event_data: dict[str, Any]) -> None:
-        """Processa un evento ricevuto da NT8."""
-        event_type = event_data.get("event", "UNKNOWN")
-
-        logger.info(f"NT8 event: {event_type} -> {event_data}")
-
-        if event_type == "ORDER_FILLED":
-            side = event_data.get("side", "")
-            fill_price = float(event_data.get("fill_price", 0))
-            qty = int(event_data.get("qty", 0))
-            order_id = event_data.get("order_id", "")
-            if side and fill_price > 0:
-                self.position.update(side, qty, fill_price, order_id)
-                self.orders_filled += 1
-
-        elif event_type == "ORDER_REJECTED":
-            self.orders_rejected += 1
-            reason = event_data.get("reason", "")
-            logger.warning(f"Order REJECTED by NT8: {reason}")
-
-        elif event_type == "POSITION_UPDATED":
-            side = event_data.get("side", "FLAT")
-            size = int(event_data.get("size", 0))
-            price = float(event_data.get("entry_price", 0))
-            if side == "FLAT" or size == 0:
-                self.position.flatten()
-            else:
-                self.position.update(side, size, price)
-
-        elif event_type == "ACCOUNT_STATUS":
-            logger.info(f"Account status: {event_data}")
-
-        # Dispatch ai handler registrati
-        self._dispatch_event(event_type, event_data)
-
     def _dispatch_event(self, event_type: str, data: dict[str, Any]) -> None:
-        """Notifica tutti gli handler registrati per questo evento."""
-        handlers = self._event_handlers.get(event_type, [])
-        for handler in handlers:
+        """Notifica handler registrati per un evento."""
+        for handler in self._event_handlers.get(event_type, []):
             try:
                 handler(data)
             except Exception as e:
                 logger.error(f"Event handler error ({event_type}): {e}")
 
     def register_event_handler(self, event_type: str, handler: Callable) -> None:
-        """Registra un callback per un tipo di evento NT8."""
+        """Registra un callback per eventi NT8."""
         if event_type not in self._event_handlers:
             self._event_handlers[event_type] = []
         self._event_handlers[event_type].append(handler)
-
-    # ============================================================
-    # Heartbeat
-    # ============================================================
-
-    def _heartbeat_loop(self) -> None:
-        """Thread: invia heartbeat periodico (ogni 5s default).
-
-        Invia sia via ZMQ (per il bridge REQ/REP) sia via TCP raw
-        per MLAutoStrategy_P1.cs che ascolta su TcpListenerLoop.
-        Se NT8 non riceve heartbeat per 30s, disabilita il trading.
-        """
-        while self._running and not self._shutdown_event.is_set():
-            self._shutdown_event.wait(self.heartbeat_interval)
-            if not self._running:
-                break
-
-            hb_msg = {
-                "type": "HEARTBEAT",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-
-            # ZMQ heartbeat (for REQ/REP bridge)
-            try:
-                zmq_msg = {"action": "HEARTBEAT", **hb_msg}
-                with self._cmd_lock:
-                    if self._cmd_socket is not None:
-                        self._cmd_socket.send_json(zmq_msg)
-                        self._cmd_socket.recv_json()
-                        self._connected = True
-            except Exception:
-                if self._connected:
-                    logger.warning("NT8 heartbeat failed — connection may be lost")
-                    self._connected = False
-
-            # TCP heartbeat (for MLAutoStrategy_P1 TcpListenerLoop)
-            self._send_tcp_heartbeat(hb_msg)
-
-    def _send_tcp_heartbeat(self, msg: dict[str, Any]) -> None:
-        """Send heartbeat via raw TCP to NT8 strategy listener."""
-        import socket
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(2)
-                sock.connect((self.host, self.cmd_port))
-                payload = json.dumps(msg).encode("utf-8")
-                sock.sendall(payload)
-        except Exception as e:
-            logger.debug(f"TCP heartbeat send failed: {e}")
 
     # ============================================================
     # Helpers
     # ============================================================
 
     def is_connected(self) -> bool:
-        """True se la connessione a NT8 e' attiva."""
+        """True se NT8 è connesso."""
         if self.paper_mode:
             return True
         return self._connected
 
     def get_position(self) -> dict[str, Any]:
-        """Ritorna lo stato posizione corrente (thread-safe)."""
+        """Ritorna stato posizione corrente."""
         return self.position.get()
 
     def _send_alert(self, message: str, level: str = "WARNING") -> None:
@@ -589,15 +553,13 @@ class NinjaTraderBridge:
     def get_status(self) -> dict[str, Any]:
         """Snapshot per monitoring."""
         return {
+            "mode": "PAPER" if self.paper_mode else "LIVE",
             "connected": self.is_connected(),
-            "paper_mode": self.paper_mode,
+            "server_port": self.cmd_port,
             "position": self.position.get(),
-            "orders_sent": self.orders_sent,
-            "orders_filled": self.orders_filled,
-            "orders_rejected": self.orders_rejected,
-            "orders_timed_out": self.orders_timed_out,
+            "orders": {
+                "sent": self.orders_sent,
+                "filled": self.orders_filled,
+                "rejected": self.orders_rejected,
+            },
         }
-
-    def close(self) -> None:
-        """Alias per stop()."""
-        self.stop()

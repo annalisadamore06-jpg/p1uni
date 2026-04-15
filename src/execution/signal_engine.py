@@ -195,10 +195,14 @@ class SignalEngine:
                     rec.reason = "V3.5 Bridge returned None (no features)"
                     return self._finalize(rec, t0)
 
-                # Spot dal feature builder (trade live) se disponibile
+                # BUG#16 fix: spot precedenza: Databento > GEX json > 0
+                # V35Bridge popola features["spot"] dal gexbot_latest.json
+                feature_dict_temp = prediction.get("features", {})
                 spot = 0.0
-                if self.feature_builder is not None and getattr(self.feature_builder, '_last_spot', None) is not None:
-                    spot = self.feature_builder._last_spot
+                if self.feature_builder is not None and getattr(self.feature_builder, '_last_spot', None):
+                    spot = float(self.feature_builder._last_spot)
+                if spot == 0.0:
+                    spot = float(feature_dict_temp.get("spot", 0.0))
                 rec.spot = spot
                 rec.step_reached = 3
 
@@ -340,7 +344,11 @@ class SignalEngine:
             rec.step_reached = 5
 
             # === STEP 6: EXECUTE ORDER ===
-            order_result = self.bridge.send_order(signal, size, sl, tp, price=spot)
+            # Passa raw_probability (avg_proba 0-1) al bridge per NT8 confidence check
+            raw_prob = prediction.get("probabilities", {}).get("raw", 0.0)
+            order_result = self.bridge.send_order(
+                signal, size, sl, tp, price=spot, raw_probability=raw_prob
+            )
 
             if order_result["success"]:
                 rec.step_reached = 6

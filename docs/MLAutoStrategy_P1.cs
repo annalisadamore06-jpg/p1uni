@@ -41,7 +41,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private const int    MAX_CONSECUTIVE_LOSSES = 4;
         private const int    AUTO_FLAT_HOUR_UTC     = 19;   // 21:55 CEST = 19:55 UTC
         private const int    AUTO_FLAT_MIN_UTC      = 55;
-        private const double MIN_CONFIDENCE         = 0.62;
+        private const double MIN_CONFIDENCE         = 0.60;  // WEAK_SIGNAL boundary (avg_proba >= 0.60)
 
         private double   dailyPnL           = 0.0;
         private double   dayStartCumProfit  = 0.0;   // CumProfit snapshot at day start
@@ -171,6 +171,17 @@ namespace NinjaTrader.NinjaScript.Strategies
                 string side       = signal["side"] != null ? signal["side"].ToString().ToUpperInvariant() : "";
                 double confidence = signal["confidence"] != null ? signal["confidence"].Value<double>() : 0;
                 string signalId   = signal["signal_id"] != null ? signal["signal_id"].ToString() : ("SIG_" + DateTime.Now.ToString("HHmmss"));
+
+                // ---- FLATTEN command: chiudi posizione corrente ----
+                if (side == "FLATTEN")
+                {
+                    Print("FLATTEN ricevuto da Python — chiusura posizione");
+                    if (Position.MarketPosition == MarketPosition.Long)
+                        ExitLong("PYTHON_FLATTEN");
+                    else if (Position.MarketPosition == MarketPosition.Short)
+                        ExitShort("PYTHON_FLATTEN");
+                    return;
+                }
 
                 if (string.IsNullOrEmpty(side) || confidence < MIN_CONFIDENCE)
                 {

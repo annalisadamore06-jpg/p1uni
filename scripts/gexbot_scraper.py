@@ -159,6 +159,116 @@ def scrape_once(conn: duckdb.DuckDBPyConnection, session: requests.Session, tick
     return count
 
 
+def export_latest_json(conn: duckdb.DuckDBPyConnection, ticker: str) -> None:
+    """
+    Esporta lo snapshot piu recente per categoria in gexbot_latest.json.
+
+    Questo file e' usato dal V35Bridge per le feature GEX live senza
+    dover aprire il DB (che e' lockato da questo processo).
+    Scrittura atomica (tmp -> rename) per evitare letture parziali.
+    """
+    try:
+        # Latest snapshot per category
+        rows = conn.execute("""
+            SELECT package, category, spot, zero_gamma,
+                   major_pos_vol, major_pos_oi, major_neg_vol, major_neg_oi,
+                   major_positive, major_negative, major_long_gamma, major_short_gamma,
+                   ts_server, raw_json
+            FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY package, category ORDER BY ts_server DESC
+                ) as rn
+                FROM gex_snapshots WHERE ticker = ?
+            ) t WHERE rn = 1
+        """, [ticker]).fetchdf()
+
+        if rows.empty:
+            return
+
+        export: dict = {
+            "ticker": ticker,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "snapshots": [],
+        }
+
+        def _safe_float(v):
+            if v is None:
+                return None
+            try:
+                import math
+                f = float(v)
+                return f if math.isfinite(f) else None
+            except (ValueError, TypeError):
+                return None
+
+        for _, row in rows.iterrows():
+            raw = {}
+            try:
+                rj = row.get("raw_json")
+                raw = json.loads(rj) if isinstance(rj, str) and rj else {}
+            except Exception:
+                pass
+            snap = {
+                "package": str(row["package"]),
+                "category": str(row["category"]),
+                "spot": _safe_float(row["spot"]),
+                "zero_gamma": _safe_float(row["zero_gamma"]),
+                "major_positive": _safe_float(row["major_positive"]),
+                "major_negative": _safe_float(row["major_negative"]),
+                "major_long_gamma": _safe_float(row["major_long_gamma"]),
+                "major_short_gamma": _safe_float(row["major_short_gamma"]),
+                "major_pos_vol": _safe_float(row["major_pos_vol"]),
+                "major_neg_vol": _safe_float(row["major_neg_vol"]),
+                "major_pos_oi": _safe_float(row["major_pos_oi"]),
+                "major_neg_oi": _safe_float(row["major_neg_oi"]),
+                "ts_server": int(row["ts_server"]) if row["ts_server"] else None,
+                "raw": raw,
+            }
+            export["snapshots"].append(snap)
+
+        # History for temporal features: last 15 rows of classic/gex_zero
+        hist = conn.execute("""
+            SELECT spot, zero_gamma, major_positive, major_negative,
+                   major_long_gamma, major_short_gamma,
+                   major_pos_vol, major_pos_oi, ts_server, raw_json
+            FROM gex_snapshots
+            WHERE ticker = ? AND package = 'classic' AND category = 'gex_zero'
+            ORDER BY ts_server DESC LIMIT 15
+        """, [ticker]).fetchdf()
+
+        export["gex_zero_history"] = []
+        for _, row in hist.iterrows():
+            raw_h = {}
+            try:
+                rj = row.get("raw_json")
+                raw_h = json.loads(rj) if isinstance(rj, str) and rj else {}
+            except Exception:
+                pass
+            export["gex_zero_history"].append({
+                "spot": _safe_float(row["spot"]),
+                "zero_gamma": _safe_float(row["zero_gamma"]),
+                "major_positive": _safe_float(row["major_positive"]),
+                "major_negative": _safe_float(row["major_negative"]),
+                "major_long_gamma": _safe_float(row["major_long_gamma"]),
+                "major_short_gamma": _safe_float(row["major_short_gamma"]),
+                "major_pos_vol": _safe_float(row["major_pos_vol"]),
+                "major_pos_oi": _safe_float(row["major_pos_oi"]),
+                "ts_server": int(row["ts_server"]) if row["ts_server"] else None,
+                "raw": raw_h,
+            })
+
+        # Atomic write to avoid partial reads by V35Bridge
+        out_path = Path(DB_PATH).parent / "gexbot_latest.json"
+        tmp_path = out_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(export, default=str), encoding="utf-8")
+        tmp_path.replace(out_path)
+
+        log.debug(f"Exported latest snapshot ({len(export['snapshots'])} categories) to {out_path.name}")
+
+    except Exception as e:
+        log.warning(f"export_latest_json failed: {e}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ticker", nargs="+", default=["ES_SPX"], help="Ticker(s) da scaricare")
@@ -190,6 +300,10 @@ def main() -> None:
 
             total = conn.execute("SELECT COUNT(*) FROM gex_snapshots").fetchone()[0]
             log.info(f"Iter {iteration}: {saved}/{len(ENDPOINTS) * len(args.ticker)} OK ({elapsed:.1f}s). Total in DB: {total:,}")
+
+            # Export latest snapshot to JSON for V35Bridge (lock-free read)
+            for ticker in args.ticker:
+                export_latest_json(conn, ticker)
 
             if args.one_shot:
                 break

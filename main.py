@@ -199,7 +199,9 @@ class P1UniSystem:
         if (v35_models_dir / "model_v35_prod_seed42.json").exists():
             try:
                 from src.ml.v35_bridge import V35Bridge
-                v35 = V35Bridge(self.config)
+                # Passa il DB singleton: V35Bridge legge GEX live dal DB live
+                # (scritto da GexBot WS adapter) invece del solo DB gold statico.
+                v35 = V35Bridge(self.config, db=self._components.get("db"))
                 self._components["v35_bridge"] = v35
                 logger.info(f"V3.5 PRODUCTION engine loaded: {v35.get_status()}")
             except Exception as e:
@@ -358,11 +360,18 @@ class P1UniSystem:
             self._shutdown_event.wait(1.0)
 
     def _run_signal_loop(self) -> None:
-        """Loop principale del signal engine."""
-        signal_engine = self._components["signal_engine"]
-        interval = self.config.get("execution", {}).get("bar_interval_min", 5) * 60
+        """Loop principale del signal engine, allineato ai boundary di orologio.
 
-        logger.info(f"Signal engine loop started (interval={interval}s)")
+        BUG#15 fix: invece di dormire per N secondi dall'ultima run,
+        ci sincronizziamo al prossimo multiplo di bar_interval_min sull'orologio
+        (es. 00, 03, 06, 09...) in modo da essere in fase con le snapshot GEX (ogni 60s).
+        """
+        import time as _time
+        signal_engine = self._components["signal_engine"]
+        interval_min = self.config.get("execution", {}).get("bar_interval_min", 3)
+        interval_sec = interval_min * 60
+
+        logger.info(f"Signal engine loop started (interval={interval_min}min, clock-aligned)")
 
         while not self._shutdown_event.is_set():
             try:
@@ -370,7 +379,13 @@ class P1UniSystem:
             except Exception as e:
                 logger.error(f"Signal engine error: {e}")
 
-            self._shutdown_event.wait(interval)
+            # Calcola il sleep fino al prossimo boundary di orologio
+            now_ts = _time.time()
+            next_boundary = (int(now_ts / interval_sec) + 1) * interval_sec
+            sleep_secs = next_boundary - now_ts
+            # Minimo 5s per evitare busy-loop, massimo interval_sec
+            sleep_secs = max(5.0, min(sleep_secs, float(interval_sec)))
+            self._shutdown_event.wait(sleep_secs)
 
     # ============================================================
     # Shutdown
