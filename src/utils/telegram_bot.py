@@ -7,6 +7,11 @@ SPECIFICHE PER QWEN:
 - send_alert(): errori, warning, info
 - send_daily_summary(): fine giornata con P&L
 - Rate limit: max 1 messaggio ogni 3 secondi
+
+REGOLA SACRA — NON VIOLARE MAI:
+  P1UNI condivide il token con p1-lite. Solo p1-lite chiama getUpdates.
+  P1UNI usa SOLO sendMessage. MAI implementare getUpdates/polling qui.
+  Violare questa regola causa furto di messaggi e rottura dei comandi p1-lite.
 """
 
 import logging
