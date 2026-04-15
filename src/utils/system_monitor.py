@@ -72,8 +72,10 @@ class SystemMonitor:
         if self.telegram is None:
             return
 
-        if status["cpu_percent"] > 90:
-            self.telegram.send_alert(f"CPU alta: {status['cpu_percent']:.0f}%", "WARNING")
+        # CPU alert disabilitato: ML training V42 porta CPU al 100% per design
+        # (era spam ogni 60s). Riabilitare solo a fine training.
+        # if status["cpu_percent"] > 90:
+        #     self.telegram.send_alert(f"CPU alta: {status['cpu_percent']:.0f}%", "WARNING")
 
         if status["ram_percent"] > 95:
             self.telegram.send_alert(
