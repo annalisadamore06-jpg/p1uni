@@ -243,35 +243,47 @@ class UnifiedIngestor:
     # P1-Lite Snapshot Saver
     # ============================================================
 
-    def save_p1_snapshot(self, mr_levels: dict, or_levels: dict, session_date: date) -> None:
-        """Salva snapshot MR/OR congelati nel DB live."""
-        try:
-            conn = duckdb.connect(self.live_db_path)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS daily_ranges_snapshot (
-                    session_date DATE, ticker VARCHAR DEFAULT 'ES',
-                    source VARCHAR DEFAULT 'P1_LITE_SNAP',
-                    mr1d DOUBLE, mr1u DOUBLE, mr2d DOUBLE, mr2u DOUBLE,
-                    or1d DOUBLE, or1u DOUBLE, or2d DOUBLE, or2u DOUBLE,
-                    vwap DOUBLE, session_high DOUBLE, session_low DOUBLE,
-                    is_final BOOLEAN DEFAULT FALSE, frozen_at TIMESTAMP
-                )
-            """)
-            conn.execute(
-                """INSERT INTO daily_ranges_snapshot
-                   (session_date, source, mr1d, mr1u, mr2d, mr2u,
-                    or1d, or1u, or2d, or2u, frozen_at)
-                   VALUES (?, 'P1_LITE_SNAP', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [
-                    session_date,
-                    mr_levels.get("mr1d"), mr_levels.get("mr1u"),
-                    mr_levels.get("mr2d"), mr_levels.get("mr2u"),
-                    or_levels.get("or1d"), or_levels.get("or1u"),
-                    or_levels.get("or2d"), or_levels.get("or2u"),
-                    datetime.now(timezone.utc),
-                ],
+    def save_p1_snapshot(self, mr_levels: dict, or_levels: dict, session_date: date, db: Any = None) -> None:
+        """Salva snapshot MR/OR congelati nel DB live.
+
+        IMPORTANTE: passare sempre db=DatabaseManager.instance() se disponibile.
+        Aprire una connessione separata da un processo diverso causa DuckDB file lock.
+        """
+        CREATE_SQL = """
+            CREATE TABLE IF NOT EXISTS daily_ranges_snapshot (
+                session_date DATE, ticker VARCHAR DEFAULT 'ES',
+                source VARCHAR DEFAULT 'P1_LITE_SNAP',
+                mr1d DOUBLE, mr1u DOUBLE, mr2d DOUBLE, mr2u DOUBLE,
+                or1d DOUBLE, or1u DOUBLE, or2d DOUBLE, or2u DOUBLE,
+                vwap DOUBLE, session_high DOUBLE, session_low DOUBLE,
+                is_final BOOLEAN DEFAULT FALSE, frozen_at TIMESTAMP
             )
-            conn.close()
+        """
+        INSERT_SQL = """INSERT INTO daily_ranges_snapshot
+               (session_date, source, mr1d, mr1u, mr2d, mr2u,
+                or1d, or1u, or2d, or2u, frozen_at)
+               VALUES (?, 'P1_LITE_SNAP', ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        params = [
+            session_date,
+            mr_levels.get("mr1d"), mr_levels.get("mr1u"),
+            mr_levels.get("mr2d"), mr_levels.get("mr2u"),
+            or_levels.get("or1d"), or_levels.get("or1u"),
+            or_levels.get("or2d"), or_levels.get("or2u"),
+            datetime.now(timezone.utc),
+        ]
+        try:
+            if db is not None:
+                # Usa il DatabaseManager condiviso: nessun lock aggiuntivo
+                db.execute_write(CREATE_SQL)
+                db.execute_write(INSERT_SQL, params)
+            else:
+                # Fallback: apri connessione dedicata e chiudila subito
+                conn = duckdb.connect(self.live_db_path)
+                try:
+                    conn.execute(CREATE_SQL)
+                    conn.execute(INSERT_SQL, params)
+                finally:
+                    conn.close()
             logger.info(f"P1 snapshot saved for {session_date}")
         except Exception as e:
             logger.error(f"P1 snapshot save error: {e}")

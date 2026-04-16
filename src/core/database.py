@@ -17,12 +17,16 @@ IMPORTANTE:
 - Il DB ml_gold.duckdb e' 159GB con 16 tabelle e 1.94B righe
 """
 
+import logging
+import re
 import threading
 from pathlib import Path
 from typing import Optional, Any
 
 import duckdb
 import pandas as pd
+
+_log = logging.getLogger("p1uni.core.database")
 
 
 class DatabaseManager:
@@ -59,6 +63,51 @@ class DatabaseManager:
         self._writer: Optional[duckdb.DuckDBPyConnection] = None
         self._writer_lock = threading.Lock()
         self._initialized = True
+
+    def check_stale_lock(self) -> None:
+        """Verifica se il DB e' bloccato da un processo morto.
+
+        Chiamare all'avvio PRIMA di aprire la connessione writer.
+        Se il DB e' locked da un PID defunto, logga CRITICAL con dettagli
+        per permettere diagnosi e intervento manuale.
+        """
+        try:
+            import psutil
+        except ImportError:
+            return  # psutil non disponibile, skip check
+
+        try:
+            duckdb.connect(str(self._db_path), read_only=True).close()
+            return  # DB apribile in read-only: nessun problema grave
+        except Exception as e:
+            err = str(e)
+            # Estrai PID dall'errore DuckDB: "... (PID 12345)."
+            m = re.search(r"\(PID\s+(\d+)\)", err)
+            if not m:
+                _log.warning(f"DB lock check: cannot open DB: {err}")
+                return
+            stale_pid = int(m.group(1))
+            try:
+                proc = psutil.Process(stale_pid)
+                is_alive = proc.is_running()
+                cmdline = " ".join(proc.cmdline()[:3]) if proc.cmdline() else proc.name()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                is_alive = False
+                cmdline = "unknown (process not found)"
+
+            if is_alive:
+                _log.critical(
+                    f"DuckDB LOCKED by live process PID {stale_pid} ({cmdline}). "
+                    f"This process is holding {self._db_path} open. "
+                    f"All DB writes will fail until PID {stale_pid} exits or releases the file. "
+                    f"To fix: kill PID {stale_pid} if it is a stale/zombie P1UNI instance."
+                )
+            else:
+                _log.critical(
+                    f"DuckDB shows stale lock from dead PID {stale_pid} — "
+                    f"the WAL file may need recovery. Path: {self._db_path}. "
+                    f"If this error persists, delete {self._db_path}.wal and restart."
+                )
 
     def get_writer(self) -> duckdb.DuckDBPyConnection:
         """Ritorna la connessione writer singleton (thread-locked).

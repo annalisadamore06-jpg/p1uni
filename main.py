@@ -134,7 +134,10 @@ class P1UniSystem:
         from src.utils.telegram_bot import TelegramBot
         from src.execution.session_manager import SessionManager
 
-        self._components["db"] = DatabaseManager(self.config)
+        db = DatabaseManager(self.config)
+        # Controlla subito se il DB e' bloccato da un processo morto
+        db.check_stale_lock()
+        self._components["db"] = db
         self._components["telegram"] = TelegramBot(self.config)
         self._components["session_mgr"] = SessionManager(self.config, self._components["db"])
 

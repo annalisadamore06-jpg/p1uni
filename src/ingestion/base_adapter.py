@@ -149,6 +149,8 @@ class BaseAdapter(ABC):
 
     # Retry scrittura DB
     DB_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0)
+    # Retry speciale per DuckDB locked by another process: attende fino a ~10 min
+    DB_LOCK_RETRY_DELAYS: tuple[float, ...] = (10.0, 20.0, 30.0, 60.0, 120.0, 180.0, 300.0)
 
     def __init__(
         self,
@@ -434,13 +436,29 @@ class BaseAdapter(ABC):
     # DB Writing con retry
     # ============================================================
 
+    @staticmethod
+    def _is_duckdb_lock_error(e: Exception) -> bool:
+        """True se l'errore e' DuckDB file locked by another process.
+
+        Il processo che tiene il lock potrebbe essere zombie: attendi prima di quarantinare.
+        """
+        err = str(e).lower()
+        return (
+            "utilizzato da un altro processo" in err
+            or "file is already open in" in err
+        )
+
     def _write_to_db_with_retry(self, df: pd.DataFrame) -> None:
         """Scrive il DataFrame validato in DuckDB con retry esponenziale.
 
+        Fase 1 - retry normali (1s, 2s, 4s) per errori generici.
+        Fase 2 - retry lunghi (fino a ~10 min) se il file e' locked da un altro processo:
+          il processo zombie che tiene il lock finira' per morire e il lock si liberera'.
         Se tutti i retry falliscono, scrive in quarantena file.
         """
         last_error: Exception | None = None
 
+        # Fase 1: retry normali
         for attempt, delay in enumerate(self.DB_RETRY_DELAYS, 1):
             try:
                 self._write_to_db(df)
@@ -453,15 +471,45 @@ class BaseAdapter(ABC):
             except Exception as e:
                 last_error = e
                 self.metrics.inc_batch_errors()
+                if self._is_duckdb_lock_error(e):
+                    # File locked: salta i retry corti, vai direttamente ai retry lunghi
+                    self._log.error(
+                        f"DuckDB file locked by another process (attempt {attempt}): {e}. "
+                        f"Switching to lock-retry mode (max {sum(self.DB_LOCK_RETRY_DELAYS)/60:.0f} min)."
+                    )
+                    break
                 self._log.warning(
                     f"DB write failed (attempt {attempt}/{len(self.DB_RETRY_DELAYS)}): {e}. "
                     f"Retrying in {delay}s..."
                 )
                 time.sleep(delay)
 
+        # Fase 2: retry lunghi (solo se l'errore e' un lock)
+        if last_error is not None and self._is_duckdb_lock_error(last_error):
+            for lock_attempt, delay in enumerate(self.DB_LOCK_RETRY_DELAYS, 1):
+                self._log.warning(
+                    f"DuckDB lock-retry {lock_attempt}/{len(self.DB_LOCK_RETRY_DELAYS)}: "
+                    f"waiting {delay:.0f}s for process to release lock..."
+                )
+                # Usa shutdown-aware sleep: se il sistema viene spento, non bloccare
+                self._shutdown_event.wait(delay)
+                if self._shutdown_event.is_set():
+                    break
+                try:
+                    self._write_to_db(df)
+                    self.metrics.inc_batches()
+                    self._log.info(
+                        f"DuckDB lock resolved at lock-retry {lock_attempt}. "
+                        f"Wrote {len(df)} records to {self.target_table}."
+                    )
+                    return
+                except Exception as e:
+                    last_error = e
+                    self.metrics.inc_batch_errors()
+
         # Tutti i retry falliti: quarantena su file
         self._log.error(
-            f"DB write FAILED after {len(self.DB_RETRY_DELAYS)} retries: {last_error}. "
+            f"DB write FAILED after all retries: {last_error}. "
             f"Sending {len(df)} records to file quarantine."
         )
         self._write_to_quarantine_file(df, str(last_error))
