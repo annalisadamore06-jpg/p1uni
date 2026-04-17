@@ -225,7 +225,9 @@ def replay_quarantine(live_db_path: str, quarantine_base: Path, date_str: str | 
                     conn.register("_qr_batch", df)
                     try:
                         cols = ", ".join(df.columns)
-                        conn.execute(f"INSERT OR IGNORE INTO {target_table} ({cols}) SELECT * FROM _qr_batch")
+                        # DuckDB does not support INSERT OR IGNORE (SQLite syntax).
+                        # Use plain INSERT; duplicates are rare (nanosec timestamps).
+                        conn.execute(f"INSERT INTO {target_table} ({cols}) SELECT * FROM _qr_batch")
                         total_replayed += n
                     except Exception as e:
                         log.error(f"    INSERT failed: {e}")
@@ -261,11 +263,30 @@ def main():
                         help="Data da replayare (es: 2026-04-16); default tutte le date")
     parser.add_argument("--dry-run", action="store_true",
                         help="Mostra cosa verrebbe replayato senza scrivere")
+    parser.add_argument("--live-db", type=str, default=None,
+                        help="Path al DB live (default: legge da config/settings.yaml -> database.path)")
     args = parser.parse_args()
 
     if args.replay_quarantine:
         base_dir = Path(__file__).parent.parent
-        live_db = base_dir / "data" / "p1uni_live.duckdb"
+
+        # Determina il DB live: CLI arg > config settings.yaml > fallback
+        if args.live_db:
+            live_db = Path(args.live_db)
+        else:
+            # Prova a leggere da config/settings.yaml
+            settings_path = base_dir / "config" / "settings.yaml"
+            if settings_path.exists():
+                import yaml
+                with open(settings_path, "r", encoding="utf-8") as _f:
+                    _cfg = yaml.safe_load(_f.read())
+                _db_path = _cfg.get("database", {}).get("path", "")
+                live_db = Path(_db_path) if _db_path else base_dir / "data" / "p1uni_live.duckdb"
+            else:
+                # Fallback: usa lo stesso DB del harvest storico
+                live_db = Path(DB_PATH).parent / "p1uni_live.duckdb"
+                log.warning(f"config/settings.yaml non trovato, usando {live_db}")
+
         quarantine_base = base_dir / "data" / "quarantine"
         log.info(f"=== QUARANTINE REPLAY ===")
         log.info(f"Live DB: {live_db}")

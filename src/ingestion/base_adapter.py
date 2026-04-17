@@ -524,19 +524,26 @@ class BaseAdapter(ABC):
 
         Le sottoclassi possono fare override per INSERT custom.
         Default: INSERT INTO target_table SELECT * FROM df.
+
+        THREAD SAFETY: tutta la sezione è protetta da _writer_lock per
+        evitare accessi concorrenti alla stessa connessione DuckDB da
+        adattatori diversi (es. gexbot + p1lite).
         """
-        conn = self.db.get_writer()
-        # Registra il DataFrame e inserisci in una transazione
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            conn.register("_batch_df", df)
-            conn.execute(f"INSERT INTO {self.target_table} SELECT * FROM _batch_df")
-            conn.execute("COMMIT")
-            conn.unregister("_batch_df")
-        except Exception:
-            conn.execute("ROLLBACK")
-            conn.unregister("_batch_df")
-            raise
+        with self.db._writer_lock:
+            conn = self.db.get_writer()
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                conn.register("_batch_df", df)
+                conn.execute(f"INSERT INTO {self.target_table} SELECT * FROM _batch_df")
+                conn.execute("COMMIT")
+                conn.unregister("_batch_df")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                    conn.unregister("_batch_df")
+                except Exception:
+                    pass
+                raise
 
     # ============================================================
     # Quarantena su file

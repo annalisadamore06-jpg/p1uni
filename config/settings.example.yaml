@@ -21,8 +21,10 @@ databento:
   buffer_size: 200000
 
 gexbot:
-  ws_url: "wss://PLACEHOLDER_GEXBOT_ENDPOINT"  # Annalisa fornira' l'URL
+  api_key: "${GEXBOT_API_KEY}"  # gexbot_custom_shE33FA5ILrtPCgETlgbKW3Hy7LeBo1xWgRz1UZlsWE
+  ws_url: "wss://PLACEHOLDER_GEXBOT_ENDPOINT"  # URL negoziato dinamicamente via /negotiate
   reconnect_max_sec: 60
+  tickers: ["ES_SPX"]
 
 p1lite:
   enabled: true

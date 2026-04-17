@@ -9,6 +9,7 @@ SPECIFICHE PER QWEN:
 """
 
 import logging
+import threading
 import time
 from typing import Any
 
@@ -30,21 +31,24 @@ class SystemMonitor:
         self.heartbeat_interval_min: int = config.get("telegram", {}).get("heartbeat_interval_min", 5)
         self.running: bool = False
         self._last_heartbeat: float = 0.0
+        self._stop_event = threading.Event()
 
     def start(self) -> None:
         """Avvia il loop di monitoraggio."""
         self.running = True
+        self._stop_event.clear()
         logger.info("System monitor started")
 
-        while self.running:
+        while self.running and not self._stop_event.is_set():
             try:
                 status = self.check_health()
                 self._check_alerts(status)
                 self._maybe_heartbeat()
-                time.sleep(self.check_interval_sec)
+                # Shutdown-aware sleep: risponde a stop() entro 1 secondo
+                self._stop_event.wait(self.check_interval_sec)
             except Exception as e:
                 logger.error(f"Monitor error: {e}")
-                time.sleep(10)
+                self._stop_event.wait(10)
 
     def check_health(self) -> dict[str, Any]:
         """Raccoglie metriche di sistema."""
@@ -99,6 +103,7 @@ class SystemMonitor:
             self._last_heartbeat = now
 
     def stop(self) -> None:
-        """Ferma il monitor."""
+        """Ferma il monitor (risponde entro 1 secondo grazie a _stop_event)."""
         self.running = False
+        self._stop_event.set()
         logger.info("System monitor stopped")

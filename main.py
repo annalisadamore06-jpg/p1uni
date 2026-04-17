@@ -113,6 +113,7 @@ class P1UniSystem:
         self._threads: list[threading.Thread] = []
         self._components: dict[str, Any] = {}
         self._started = False
+        self._shutdown_complete = False
 
         logger.info(f"P1UNI initializing in {self.mode.upper()} mode...")
 
@@ -153,12 +154,17 @@ class P1UniSystem:
         telegram = self._components["telegram"]
 
         # GexBot (Azure Web PubSub)
-        if self.config.get("gexbot", {}).get("api_key"):
+        # api_key may come from config OR from env var GEXBOT_API_KEY (both are valid)
+        _gexbot_key = (
+            self.config.get("gexbot", {}).get("api_key")
+            or os.environ.get("GEXBOT_API_KEY", "")
+        )
+        if _gexbot_key:
             from src.ingestion.adapter_ws import GexBotWebSocketAdapter
             self._components["adapter_ws"] = GexBotWebSocketAdapter(self.config, db, telegram)
             logger.info("GexBot adapter initialized (Azure Web PubSub)")
         else:
-            logger.warning("GexBot adapter DISABLED (no api_key in config)")
+            logger.warning("GexBot adapter DISABLED (no api_key in config or GEXBOT_API_KEY env var)")
 
         # P1-Lite
         if self.config.get("p1lite", {}).get("enabled", False):
@@ -405,9 +411,11 @@ class P1UniSystem:
             self.shutdown()
 
     def shutdown(self) -> None:
-        """Shutdown ordinato con timeout per step."""
-        if self._shutdown_event.is_set() and not self._started:
+        """Shutdown ordinato con timeout per step. Idempotente: sicuro da chiamare più volte."""
+        if self._shutdown_complete:
             return
+        self._shutdown_complete = True
+
         logger.info("=" * 60)
         logger.info("  SHUTTING DOWN P1UNI")
         logger.info("=" * 60)

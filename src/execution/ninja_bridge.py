@@ -304,6 +304,11 @@ class NinjaTraderBridge:
             self.position.flatten()
             logger.info(f"Position FLAT (pnl={pnl:.2f})")
 
+        elif etype in ("REJECTED", "ORDER_REJECTED"):
+            self.orders_rejected += 1
+            reason = event.get("reason", "unknown")
+            logger.warning(f"Order rejected by NT8: {reason}")
+
         elif etype == "ACCOUNT":
             daily_pnl = event.get("daily_pnl", 0)
             logger.info(f"Account update: daily_pnl={daily_pnl}")
@@ -406,13 +411,17 @@ class NinjaTraderBridge:
         else:
             confidence_for_nt8 = 0.62
 
+        # In paper mode, use _paper_last_price as fill price when price=0
+        effective_price = price if price > 0 else self._paper_last_price
+
         msg = {
             "side": side,
             "confidence": round(confidence_for_nt8, 4),
             "signal_id": order_id,
+            "qty": size,
             "sl_hint": round(sl, 2),   # informativo
             "tp_hint": round(tp, 2),   # informativo
-            "entry_price": round(price, 2),
+            "entry_price": round(effective_price, 2),
         }
 
         logger.info(
@@ -426,6 +435,10 @@ class NinjaTraderBridge:
 
         if not self._connected:
             logger.warning("NT8 not connected — signal queued/dropped")
+            self._send_alert(
+                f"⚠️ Segnale {side} DROPPATO: NT8 non connesso (strategy offline?)",
+                "WARNING",
+            )
             return {
                 "success": False,
                 "order_id": order_id,
@@ -481,16 +494,17 @@ class NinjaTraderBridge:
     def _paper_execute(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Simula esecuzione in paper mode."""
         side = msg.get("side", "")
-        price = msg.get("entry_price", self._paper_last_price)
+        price = msg.get("entry_price") or self._paper_last_price
+        qty = int(msg.get("qty", 1))
         order_id = msg.get("signal_id", "")
 
         if side in ("LONG", "SHORT"):
-            self.position.update(side, 1, price, order_id)
+            self.position.update(side, qty, price, order_id)
             self.orders_filled += 1
-            logger.info(f"[PAPER] Signal 'filled': {side} @ {price}")
+            logger.info(f"[PAPER] Signal 'filled': {side} x{qty} @ {price}")
             self._dispatch_event("ORDER_FILLED", {
                 "side": side,
-                "qty": 1,
+                "qty": qty,
                 "fill_price": price,
                 "order_id": order_id,
             })
@@ -554,6 +568,7 @@ class NinjaTraderBridge:
         """Snapshot per monitoring."""
         return {
             "mode": "PAPER" if self.paper_mode else "LIVE",
+            "paper_mode": self.paper_mode,   # alias booleano per backward compat
             "connected": self.is_connected(),
             "server_port": self.cmd_port,
             "position": self.position.get(),

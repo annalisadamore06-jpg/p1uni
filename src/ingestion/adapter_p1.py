@@ -312,10 +312,11 @@ class P1LiteAdapter(BaseAdapter):
         if not isinstance(data, dict):
             return None
 
-        # Estrai spot/prezzo
+        # Estrai spot/prezzo (con fallback a msg top-level per messaggi nested)
         spot_raw = (
             data.get("spot") or data.get("price") or
-            data.get("last_price") or data.get("close")
+            data.get("last_price") or data.get("close") or
+            (msg.get("spot") or msg.get("price") if data is not msg else None)
         )
         if spot_raw is None:
             self._log.debug("P1-Lite message without spot/price, skipping")
