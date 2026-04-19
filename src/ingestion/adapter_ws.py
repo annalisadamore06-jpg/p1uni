@@ -63,6 +63,97 @@ class GexBotWebSocketAdapter(BaseAdapter):
         base_dir = Path(config.get("_base_dir", "."))
         self._gex_cache_path = base_dir / "data" / "cache" / "gex_cache.json"
 
+        self._ensure_tables()
+
+    def _ensure_tables(self) -> None:
+        """Create gex_summary, greeks_summary, and orderflow tables if they don't exist."""
+        try:
+            self.db.execute_write("""
+                CREATE TABLE IF NOT EXISTS gex_summary (
+                    ts_utc TIMESTAMP,
+                    session_date DATE,
+                    ticker VARCHAR,
+                    source VARCHAR DEFAULT 'WS',
+                    spot DOUBLE,
+                    zero_gamma DOUBLE,
+                    call_wall_vol DOUBLE,
+                    call_wall_oi DOUBLE,
+                    put_wall_vol DOUBLE,
+                    put_wall_oi DOUBLE,
+                    net_gex_vol DOUBLE,
+                    net_gex_oi DOUBLE,
+                    delta_rr DOUBLE,
+                    hub VARCHAR,
+                    aggregation VARCHAR,
+                    n_strikes INTEGER,
+                    min_dte INTEGER,
+                    sec_min_dte INTEGER
+                )
+            """)
+            self.db.execute_write("""
+                CREATE TABLE IF NOT EXISTS greeks_summary (
+                    ts_utc TIMESTAMP,
+                    session_date DATE,
+                    ticker VARCHAR,
+                    source VARCHAR DEFAULT 'WS',
+                    spot DOUBLE,
+                    greek_type VARCHAR,
+                    dte_type VARCHAR,
+                    major_positive DOUBLE,
+                    major_negative DOUBLE,
+                    major_long_gamma DOUBLE,
+                    major_short_gamma DOUBLE,
+                    hub VARCHAR,
+                    min_dte INTEGER,
+                    sec_min_dte INTEGER
+                )
+            """)
+            self.db.execute_write("""
+                CREATE TABLE IF NOT EXISTS orderflow (
+                    ts_utc TIMESTAMP,
+                    session_date DATE,
+                    ticker VARCHAR,
+                    source VARCHAR DEFAULT 'WS',
+                    spot DOUBLE,
+                    zero_major_long_gamma DOUBLE,
+                    zero_major_short_gamma DOUBLE,
+                    one_major_long_gamma DOUBLE,
+                    one_major_short_gamma DOUBLE,
+                    zero_major_call_gamma DOUBLE,
+                    zero_major_put_gamma DOUBLE,
+                    one_major_call_gamma DOUBLE,
+                    one_major_put_gamma DOUBLE,
+                    zero_convexity_ratio INTEGER,
+                    one_convexity_ratio INTEGER,
+                    zero_gex_ratio INTEGER,
+                    one_gex_ratio INTEGER,
+                    zero_net_vanna INTEGER,
+                    one_net_vanna INTEGER,
+                    zero_net_charm INTEGER,
+                    one_net_charm INTEGER,
+                    zero_agg_total_dex INTEGER,
+                    one_agg_total_dex INTEGER,
+                    zero_agg_call_dex INTEGER,
+                    one_agg_call_dex INTEGER,
+                    zero_agg_put_dex INTEGER,
+                    one_agg_put_dex INTEGER,
+                    zero_net_total_dex INTEGER,
+                    one_net_total_dex INTEGER,
+                    zero_net_call_dex INTEGER,
+                    one_net_call_dex INTEGER,
+                    zero_net_put_dex INTEGER,
+                    one_net_put_dex INTEGER,
+                    dex_orderflow INTEGER,
+                    gex_orderflow INTEGER,
+                    convexity_orderflow INTEGER,
+                    one_dex_orderflow INTEGER,
+                    one_gex_orderflow INTEGER,
+                    one_convexity_orderflow INTEGER
+                )
+            """)
+        except Exception as e:
+            self._log.error(f"Failed to create GexBot tables: {e}")
+
     def connect(self) -> None:
         """Negozia con GexBot API e connette a tutti gli hub."""
         if not self.api_key:
@@ -203,10 +294,12 @@ class GexBotWebSocketAdapter(BaseAdapter):
             "major_long_gamma": data.get("major_long_gamma"),
             "major_short_gamma": data.get("major_short_gamma"),
             "hub": "classic", "min_dte": data.get("min_dte"), "sec_min_dte": data.get("sec_min_dte"),
+            "_target_table": "greeks_summary",
         }
         self.process_message(record)
 
     def _ingest_orderflow(self, data: dict) -> None:
+        data["_target_table"] = "orderflow"
         self.process_message(data)
 
     def _update_gex_cache(self, record: dict) -> None:

@@ -233,10 +233,12 @@ class SignalEngine:
                     rec.details["is_valid"] = False
                     return self._finalize(rec, t0)
 
-                spot = feature_dict.get("ofi_buy", 0)
-                if self.feature_builder._last_spot is not None:
-                    spot = self.feature_builder._last_spot
-                rec.spot = spot
+                spot = getattr(self.feature_builder, '_last_spot', None)
+                if spot is None or spot == 0:
+                    rec.step_reached = 2
+                    rec.reason = "No valid spot price available (skipping signal)"
+                    return self._finalize(rec, t0)
+                rec.spot = float(spot)
                 rec.step_reached = 2
 
                 prediction = self.ensemble.predict(feature_dict)

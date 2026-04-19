@@ -1,7 +1,6 @@
 import json
-import threading
 import zstandard
-from typing import Dict
+from typing import Dict, Optional
 from google.protobuf import any_pb2
 
 # --- Import generated proto files ---
@@ -11,26 +10,30 @@ import generated_proto.option_profile_pb2 as option_profile_pb2
 import generated_proto.orderflow_pb2 as orderflow_pb2
 # ------------------------------------
 
-# --- Zstandard Decompressor (thread-local for safety) ---
-_thread_local = threading.local()
+
+# Create a fresh decompressor per call to guarantee thread safety
+# across all zstandard versions (< 0.19 reuses internal buffers).
+
+def _decompress_bytes(compressed: bytes) -> Optional[bytes]:
+    """Decompress zstd bytes. Returns None on any error."""
+    if not compressed:
+        return None
+    try:
+        dctx = zstandard.ZstdDecompressor()
+        return dctx.decompress(compressed, max_output_size=50_000_000)
+    except Exception:
+        return None
 
 
-def _get_dctx() -> zstandard.ZstdDecompressor:
-    """Return a per-thread ZstdDecompressor instance."""
-    if not hasattr(_thread_local, "dctx"):
-        _thread_local.dctx = zstandard.ZstdDecompressor()
-    return _thread_local.dctx
-# --------------------------------------------------------
-
-
-def decompress_gex_message(any_message: any_pb2.Any) -> Dict:
+def decompress_gex_message(any_message: any_pb2.Any) -> Optional[Dict]:
     """
     Decompresses and decodes a ZSTD-compressed Gex message from a google.protobuf.Any.
+    Returns None on any error.
     """
     # 1. Decompress the raw bytes
-    compressed_bytes = any_message.value
-    with _get_dctx().stream_reader(compressed_bytes) as reader:
-        decompressed_bytes = reader.read()
+    decompressed_bytes = _decompress_bytes(any_message.value)
+    if decompressed_bytes is None:
+        return None
 
     # 2. Decode the Gex Protobuf data
     decoded_proto = gex_pb2.Gex()
@@ -75,15 +78,16 @@ def decompress_gex_message(any_message: any_pb2.Any) -> Dict:
     return classic_gex
 
 
-def decompress_greek_message(any_message: any_pb2.Any, current_category: str) -> Dict:
+def decompress_greek_message(any_message: any_pb2.Any, current_category: str) -> Optional[Dict]:
     """
     Decompresses and decodes a ZSTD-compressed message.
     Conditionally deserializes as JSON or Protobuf based on the category.
+    Returns None on any error.
     """
     # 1. Decompress the raw bytes
-    compressed_bytes = any_message.value
-    with _get_dctx().stream_reader(compressed_bytes) as reader:
-        decompressed_bytes = reader.read()
+    decompressed_bytes = _decompress_bytes(any_message.value)
+    if decompressed_bytes is None:
+        return None
 
     # 2. Conditionally deserialize
     if current_category in ('volume_zero', 'volume_one'):
@@ -150,14 +154,15 @@ def decompress_greek_message(any_message: any_pb2.Any, current_category: str) ->
         return live_contracts
 
 
-def decompress_orderflow_message(any_message: any_pb2.Any) -> Dict:
+def decompress_orderflow_message(any_message: any_pb2.Any) -> Optional[Dict]:
     """
     Decompresses and decodes a ZSTD-compressed Orderflow message from a google.protobuf.Any.
+    Returns None on any error.
     """
     # 1. Decompress the raw bytes
-    compressed_bytes = any_message.value
-    with _get_dctx().stream_reader(compressed_bytes) as reader:
-        decompressed_bytes = reader.read()
+    decompressed_bytes = _decompress_bytes(any_message.value)
+    if decompressed_bytes is None:
+        return None
 
     # 2. Decode the Orderflow Protobuf data
     decoded_proto = orderflow_pb2.Orderflow()

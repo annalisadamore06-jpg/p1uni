@@ -82,7 +82,7 @@ class V35Bridge:
 
         # BUG#9 fix: history saved here, temporal features computed AFTER derived features
         self._last_json_history: list[dict] = []
-        self._last_json_now: datetime = datetime.utcnow()
+        self._last_json_now: datetime = datetime.now(timezone.utc)
 
     # ─────────────────────────────────────────────────────────────────────────
     # PUBLIC API
@@ -125,7 +125,7 @@ class V35Bridge:
         features["is_close_hedging"]= 1.0 if 20 * 60 <= mins else 0.0
 
         # VIX default conservativo se non disponibile
-        if "vix" not in features or features.get("vix", 0) == 0:
+        if "vix" not in features or features.get("vix") is None or features.get("vix") == 0:
             # Stima VIX da condizioni di mercato
             # In regime positivo gamma (net_gex > 0): VIX tipicamente bassa (14-20)
             # In regime negativo gamma (net_gex < 0): VIX tipicamente alta (20-35)
@@ -362,14 +362,15 @@ class V35Bridge:
             cat = snap.get("category", "")
             raw = snap.get("raw", {}) or {}
 
-            spot = sf(snap.get("spot")) or sf(raw.get("spot"))
+            spot_val = sf(snap.get("spot"))
+            spot = spot_val if spot_val is not None else sf(raw.get("spot"))
 
             # EXACT NAME MATCH: any raw key that matches a V3.5 feature name
             for k, v in raw.items():
                 if k in self._feature_set and not isinstance(v, (list, dict)):
                     set_f(k, v)
 
-            if spot:
+            if spot is not None:
                 set_f("spot", spot)
 
             # ── classic/gex_zero ──────────────────────────────────────────
@@ -378,59 +379,69 @@ class V35Bridge:
             if pkg == "classic" and cat == "gex_zero":
                 set_f("zero_gamma",       raw.get("zero_gamma"))
                 # Call wall (major positive GEX level) — prefer OI
-                cw = sf(raw.get("major_pos_oi")) or sf(raw.get("major_pos_vol"))
-                if cw:
+                _cw_oi = sf(raw.get("major_pos_oi"))
+                cw = _cw_oi if _cw_oi is not None else sf(raw.get("major_pos_vol"))
+                if cw is not None:
                     set_f("call_wall_oi",   cw)
                     set_f("zero_major_call", cw)
                     set_f("call_wall_strike", cw)
                 # Put wall (major negative GEX level)
-                pw = sf(raw.get("major_neg_oi")) or sf(raw.get("major_neg_vol"))
-                if pw:
+                _pw_oi = sf(raw.get("major_neg_oi"))
+                pw = _pw_oi if _pw_oi is not None else sf(raw.get("major_neg_vol"))
+                if pw is not None:
                     set_f("put_wall_oi",    pw)
                     set_f("zero_major_put",  pw)
                     set_f("put_wall_strike", pw)
                 # Net GEX (by OI is more stable)
-                ng = sf(raw.get("sum_gex_oi")) or sf(raw.get("sum_gex_vol"))
-                if ng:
+                _ng_oi = sf(raw.get("sum_gex_oi"))
+                ng = _ng_oi if _ng_oi is not None else sf(raw.get("sum_gex_vol"))
+                if ng is not None:
                     set_f("net_gex_oi",     ng)
                     set_f("net_gamma_zero", ng)
                     set_f("gex_ratio_total", sf(raw.get("sum_gex_vol")))
                 # Delta risk reversal
                 drr = sf(raw.get("delta_risk_reversal"))
-                if drr:
+                if drr is not None:
                     set_f("delta_rr", drr)
 
             # ── classic/gex_one ───────────────────────────────────────────
             elif pkg == "classic" and cat == "gex_one":
-                zg1 = sf(snap.get("zero_gamma")) or sf(raw.get("zero_gamma"))
-                if zg1: set_f("one_zero_gamma", zg1)
-                cw1 = sf(raw.get("major_pos_oi")) or sf(raw.get("major_pos_vol"))
-                if cw1:
+                _zg1_s = sf(snap.get("zero_gamma"))
+                zg1 = _zg1_s if _zg1_s is not None else sf(raw.get("zero_gamma"))
+                if zg1 is not None: set_f("one_zero_gamma", zg1)
+                _cw1_oi = sf(raw.get("major_pos_oi"))
+                cw1 = _cw1_oi if _cw1_oi is not None else sf(raw.get("major_pos_vol"))
+                if cw1 is not None:
                     set_f("one_call_wall_oi", cw1)
                     set_f("one_major_call",   cw1)
-                pw1 = sf(raw.get("major_neg_oi")) or sf(raw.get("major_neg_vol"))
-                if pw1:
+                _pw1_oi = sf(raw.get("major_neg_oi"))
+                pw1 = _pw1_oi if _pw1_oi is not None else sf(raw.get("major_neg_vol"))
+                if pw1 is not None:
                     set_f("one_put_wall_oi",  pw1)
                     set_f("one_major_put",    pw1)
-                ng1 = sf(raw.get("sum_gex_oi")) or sf(raw.get("sum_gex_vol"))
-                if ng1:
+                _ng1_oi = sf(raw.get("sum_gex_oi"))
+                ng1 = _ng1_oi if _ng1_oi is not None else sf(raw.get("sum_gex_vol"))
+                if ng1 is not None:
                     set_f("net_gamma_one",  ng1)
 
             # ── classic/gex_full ──────────────────────────────────────────
             elif pkg == "classic" and cat == "gex_full":
                 # Full-range GEX — use as fallback for zero features if not set
                 set_f("zero_gamma",  raw.get("zero_gamma"), overwrite=False)
-                cw_f = sf(raw.get("major_pos_oi")) or sf(raw.get("major_pos_vol"))
-                if cw_f:
+                _cwf_oi = sf(raw.get("major_pos_oi"))
+                cw_f = _cwf_oi if _cwf_oi is not None else sf(raw.get("major_pos_vol"))
+                if cw_f is not None:
                     set_f("call_wall_oi",  cw_f, overwrite=False)
-                pw_f = sf(raw.get("major_neg_oi")) or sf(raw.get("major_neg_vol"))
-                if pw_f:
+                _pwf_oi = sf(raw.get("major_neg_oi"))
+                pw_f = _pwf_oi if _pwf_oi is not None else sf(raw.get("major_neg_vol"))
+                if pw_f is not None:
                     set_f("put_wall_oi",   pw_f, overwrite=False)
-                ng_f = sf(raw.get("sum_gex_oi")) or sf(raw.get("sum_gex_vol"))
-                if ng_f:
+                _ngf_oi = sf(raw.get("sum_gex_oi"))
+                ng_f = _ngf_oi if _ngf_oi is not None else sf(raw.get("sum_gex_vol"))
+                if ng_f is not None:
                     set_f("net_gex_oi",    ng_f, overwrite=False)
                 drr_f = sf(raw.get("delta_risk_reversal"))
-                if drr_f:
+                if drr_f is not None:
                     set_f("delta_rr",      drr_f, overwrite=False)
 
             # ── state/delta_zero & state/gamma_zero (same structure) ──────
@@ -439,7 +450,9 @@ class V35Bridge:
                 if cat == "gamma_zero":
                     set_f("zero_major_long_gamma",  raw.get("major_long_gamma"))
                     set_f("zero_major_short_gamma", raw.get("major_short_gamma"))
-                    ng = sf(raw.get("major_positive")) - sf(raw.get("major_negative")) if (sf(raw.get("major_positive")) and sf(raw.get("major_negative"))) else None
+                    _mp_g = sf(raw.get("major_positive"))
+                    _mn_g = sf(raw.get("major_negative"))
+                    ng = (_mp_g - _mn_g) if (_mp_g is not None and _mn_g is not None) else None
                     if ng is not None:
                         set_f("net_gamma_zero", ng, overwrite=False)
                 elif cat == "delta_zero":
@@ -448,10 +461,10 @@ class V35Bridge:
                     mn2 = sf(raw.get("major_negative"))
                     ml2 = sf(raw.get("major_long_gamma"))  # delta long level
                     ms2 = sf(raw.get("major_short_gamma")) # delta short level
-                    if mp:  set_f("zero_agg_dex", mp, overwrite=False)
-                    if mn2: set_f("zero_net_dex",  mn2, overwrite=False)
-                    if ml2: set_f("greek_major_long",  ml2, overwrite=False)
-                    if ms2: set_f("greek_major_short", ms2, overwrite=False)
+                    if mp is not None:  set_f("zero_agg_dex", mp, overwrite=False)
+                    if mn2 is not None: set_f("zero_net_dex",  mn2, overwrite=False)
+                    if ml2 is not None: set_f("greek_major_long",  ml2, overwrite=False)
+                    if ms2 is not None: set_f("greek_major_short", ms2, overwrite=False)
 
             # ── state/delta_one & state/gamma_one ─────────────────────────
             elif pkg == "state" and cat in ("delta_one", "gamma_one"):
@@ -461,22 +474,22 @@ class V35Bridge:
                 elif cat == "delta_one":
                     mp1 = sf(raw.get("major_positive"))
                     mn1 = sf(raw.get("major_negative"))
-                    if mp1: set_f("one_agg_dex", mp1)
-                    if mn1: set_f("one_net_dex",  mn1)
+                    if mp1 is not None: set_f("one_agg_dex", mp1)
+                    if mn1 is not None: set_f("one_net_dex",  mn1)
 
             # ── state/vanna_zero ──────────────────────────────────────────
             elif pkg == "state" and cat == "vanna_zero":
                 mp_v = sf(raw.get("major_positive"))
                 ml_v = sf(raw.get("major_long_gamma"))
-                if mp_v: set_f("vanna_total", mp_v, overwrite=False)
-                if ml_v: set_f("vanna_best",  ml_v, overwrite=False)
+                if mp_v is not None: set_f("vanna_total", mp_v, overwrite=False)
+                if ml_v is not None: set_f("vanna_best",  ml_v, overwrite=False)
 
             # ── state/charm_zero ──────────────────────────────────────────
             elif pkg == "state" and cat == "charm_zero":
                 mp_c = sf(raw.get("major_positive"))
                 ml_c = sf(raw.get("major_long_gamma"))
-                if mp_c: set_f("charm_total", mp_c, overwrite=False)
-                if ml_c: set_f("charm_best",  ml_c, overwrite=False)
+                if mp_c is not None: set_f("charm_total", mp_c, overwrite=False)
+                if ml_c is not None: set_f("charm_best",  ml_c, overwrite=False)
 
             # ── orderflow/orderflow ───────────────────────────────────────
             # Fields verified from API: dexoflow, gexoflow, cvroflow,
@@ -499,8 +512,8 @@ class V35Bridge:
                 # Best flows (raw levels are "best" signals)
                 nd = sf(raw.get("net_dex"))
                 zg_ = sf(raw.get("zgr"))
-                if nd:  set_f("dex_flow_best",  nd)
-                if zg_: set_f("gex_flow_best",  zg_)
+                if nd is not None:  set_f("dex_flow_best",  nd)
+                if zg_ is not None: set_f("gex_flow_best",  zg_)
                 set_f("net_dex_total", raw.get("net_dex"))
                 # DEX aggregates
                 set_f("zero_agg_dex", raw.get("agg_dex"),      overwrite=False)
@@ -534,7 +547,7 @@ class V35Bridge:
                 # Greek major net
                 zml = sf(raw.get("z_mlgamma"))
                 zms = sf(raw.get("z_msgamma"))
-                if zml and zms:
+                if zml is not None and zms is not None:
                     set_f("greek_major_long",  zml)
                     set_f("greek_major_short", zms)
                     set_f("greek_major_net",   zml - zms)
@@ -548,7 +561,7 @@ class V35Bridge:
                           1.0 if (df_ > 0 and gf_ < 0) or (df_ < 0 and gf_ > 0) else 0.0)
                 # MM composite proxy
                 mm = sf(raw.get("mm_composite"))
-                if mm:
+                if mm is not None:
                     set_f("mm_composite", mm)
                 elif nd is not None and zg_ is not None:
                     # Proxy: normalized combination of DEX and GEX flow
@@ -645,17 +658,21 @@ class V35Bridge:
             if ncd is not None and npd is not None:
                 return ncd - npd
             # Proxy from call/put wall levels
-            cw = sf(raw.get("major_pos_oi")) or sf(raw.get("major_pos_vol")) or 0.0
-            pw = sf(raw.get("major_neg_oi")) or sf(raw.get("major_neg_vol")) or 0.0
-            return cw - pw if (cw or pw) else 0.0
+            _cw = sf(raw.get("major_pos_oi"))
+            cw = _cw if _cw != 0.0 else sf(raw.get("major_pos_vol"))
+            _pw = sf(raw.get("major_neg_oi"))
+            pw = _pw if _pw != 0.0 else sf(raw.get("major_neg_vol"))
+            return cw - pw if (cw != 0.0 or pw != 0.0) else 0.0
 
         cpp_arr = np.array([cpp_from_h(h) for h in hist])
 
         # greek_major_net: from raw z_mlgamma - z_msgamma or major_long - major_short
         def gmn_from_h(h):
             raw = h.get("raw", {}) or {}
-            ml_ = sf(raw.get("z_mlgamma")) or sf(raw.get("major_long_gamma")) or 0.0
-            ms_ = sf(raw.get("z_msgamma")) or sf(raw.get("major_short_gamma")) or 0.0
+            _ml = sf(raw.get("z_mlgamma"))
+            ml_ = _ml if _ml != 0.0 else sf(raw.get("major_long_gamma"))
+            _ms = sf(raw.get("z_msgamma"))
+            ms_ = _ms if _ms != 0.0 else sf(raw.get("major_short_gamma"))
             return ml_ - ms_
 
         gmn_arr = np.array([gmn_from_h(h) for h in hist])

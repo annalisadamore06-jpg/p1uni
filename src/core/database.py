@@ -61,7 +61,7 @@ class DatabaseManager:
         self._memory_limit = config["database"].get("memory_limit", "110GB")
 
         self._writer: Optional[duckdb.DuckDBPyConnection] = None
-        self._writer_lock = threading.Lock()
+        self._writer_lock = threading.RLock()
         self._initialized = True
 
     def check_stale_lock(self) -> None:
@@ -114,19 +114,23 @@ class DatabaseManager:
 
         QWEN: questa connessione e' in read-write con WAL mode.
         Usala SOLO dal thread di ingestion. Mai da ML o Execution.
+
+        Thread-safe: uses _writer_lock to prevent two threads from
+        creating duplicate writer connections (DuckDB is single-writer).
         """
-        if self._writer is None:
-            self._writer = duckdb.connect(
-                str(self._db_path),
-                read_only=False,
-                config={
-                    "threads": str(self._threads),
-                    "memory_limit": self._memory_limit,
-                },
-            )
-            # WAL mode per permettere letture concorrenti
-            self._writer.execute("PRAGMA wal_autocheckpoint='1GB'")
-        return self._writer
+        with self._writer_lock:
+            if self._writer is None:
+                self._writer = duckdb.connect(
+                    str(self._db_path),
+                    read_only=False,
+                    config={
+                        "threads": str(self._threads),
+                        "memory_limit": self._memory_limit,
+                    },
+                )
+                # WAL mode per permettere letture concorrenti
+                self._writer.execute("PRAGMA wal_autocheckpoint='1GB'")
+            return self._writer
 
     def get_reader(self) -> duckdb.DuckDBPyConnection:
         """Ritorna una connessione per lettura.

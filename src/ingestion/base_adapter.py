@@ -333,8 +333,22 @@ class BaseAdapter(ABC):
         NON fa validazione qui (la fa il batch writer).
         """
         try:
+            # Preserve routing metadata before normalization (normalizers create new dicts)
+            target_table_override = raw_data.pop("_target_table", None)
+
             # Normalizza (immutabile, crea copia)
-            normalized = self.normalizer.normalize(raw_data, self.source_type)
+            # Use correct source_type for routing: GREEKS/ORDERFLOW need their own normalizer
+            effective_source = self.source_type
+            if target_table_override == "greeks_summary":
+                effective_source = "GREEKS"
+            elif target_table_override == "orderflow":
+                effective_source = "ORDERFLOW"
+            normalized = self.normalizer.normalize(raw_data, effective_source)
+
+            # Re-attach routing metadata after normalization
+            if target_table_override is not None:
+                normalized["_target_table"] = target_table_override
+
             self.metrics.inc_received()
 
             # Accoda
@@ -402,7 +416,12 @@ class BaseAdapter(ABC):
         self._log.info("Batch writer stopped")
 
     def _flush_queue(self) -> None:
-        """Svuota la queue e scrive il batch su DB."""
+        """Svuota la queue e scrive il batch su DB.
+
+        Records can carry a '_target_table' key to override the default
+        target_table (used by GexBot adapter to route greeks/orderflow).
+        Records are grouped by target table and written separately.
+        """
         # Drain queue
         batch: list[dict[str, Any]] = []
         while len(batch) < self.BATCH_SIZE * 2:  # max 2x per evitare drain infinito
@@ -415,22 +434,29 @@ class BaseAdapter(ABC):
         if not batch:
             return
 
-        self._log.debug(f"Flushing {len(batch)} records to {self.target_table}")
+        # Group records by target table
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for record in batch:
+            table = record.pop("_target_table", self.target_table)
+            groups.setdefault(table, []).append(record)
 
-        # Valida il batch
-        valid_df = self.validator.validate_batch_and_quarantine(batch, self.target_table)
-        n_rejected = len(batch) - len(valid_df)
+        for table, table_batch in groups.items():
+            self._log.debug(f"Flushing {len(table_batch)} records to {table}")
 
-        self.metrics.inc_validated(len(valid_df))
-        if n_rejected > 0:
-            self.metrics.inc_quarantined(n_rejected)
-            self._log.info(f"Batch: {len(valid_df)} valid, {n_rejected} quarantined")
+            # Valida il batch
+            valid_df = self.validator.validate_batch_and_quarantine(table_batch, table)
+            n_rejected = len(table_batch) - len(valid_df)
 
-        if valid_df.empty:
-            return
+            self.metrics.inc_validated(len(valid_df))
+            if n_rejected > 0:
+                self.metrics.inc_quarantined(n_rejected)
+                self._log.info(f"Batch: {len(valid_df)} valid, {n_rejected} quarantined ({table})")
 
-        # Scrivi in DB con retry
-        self._write_to_db_with_retry(valid_df)
+            if valid_df.empty:
+                continue
+
+            # Scrivi in DB con retry
+            self._write_to_db_with_retry(valid_df, table)
 
     # ============================================================
     # DB Writing con retry
@@ -448,23 +474,27 @@ class BaseAdapter(ABC):
             or "file is already open in" in err
         )
 
-    def _write_to_db_with_retry(self, df: pd.DataFrame) -> None:
+    def _write_to_db_with_retry(self, df: pd.DataFrame, table: str | None = None) -> None:
         """Scrive il DataFrame validato in DuckDB con retry esponenziale.
 
         Fase 1 - retry normali (1s, 2s, 4s) per errori generici.
         Fase 2 - retry lunghi (fino a ~10 min) se il file e' locked da un altro processo:
           il processo zombie che tiene il lock finira' per morire e il lock si liberera'.
         Se tutti i retry falliscono, scrive in quarantena file.
+
+        Args:
+            table: Target table name. Defaults to self.target_table.
         """
+        target = table or self.target_table
         last_error: Exception | None = None
 
         # Fase 1: retry normali
         for attempt, delay in enumerate(self.DB_RETRY_DELAYS, 1):
             try:
-                self._write_to_db(df)
+                self._write_to_db(df, target)
                 self.metrics.inc_batches()
                 self._log.info(
-                    f"Wrote {len(df)} records to {self.target_table} "
+                    f"Wrote {len(df)} records to {target} "
                     f"(total: {self.metrics.records_validated_ok})"
                 )
                 return
@@ -496,11 +526,11 @@ class BaseAdapter(ABC):
                 if self._shutdown_event.is_set():
                     break
                 try:
-                    self._write_to_db(df)
+                    self._write_to_db(df, target)
                     self.metrics.inc_batches()
                     self._log.info(
                         f"DuckDB lock resolved at lock-retry {lock_attempt}. "
-                        f"Wrote {len(df)} records to {self.target_table}."
+                        f"Wrote {len(df)} records to {target}."
                     )
                     return
                 except Exception as e:
@@ -519,22 +549,26 @@ class BaseAdapter(ABC):
             level="ERROR",
         )
 
-    def _write_to_db(self, df: pd.DataFrame) -> None:
+    def _write_to_db(self, df: pd.DataFrame, table: str | None = None) -> None:
         """Scrive il DataFrame in DuckDB in una singola transazione.
 
         Le sottoclassi possono fare override per INSERT custom.
         Default: INSERT INTO target_table SELECT * FROM df.
 
+        Args:
+            table: Target table name. Defaults to self.target_table.
+
         THREAD SAFETY: tutta la sezione è protetta da _writer_lock per
         evitare accessi concorrenti alla stessa connessione DuckDB da
         adattatori diversi (es. gexbot + p1lite).
         """
+        target = table or self.target_table
         with self.db._writer_lock:
             conn = self.db.get_writer()
             conn.execute("BEGIN TRANSACTION")
             try:
                 conn.register("_batch_df", df)
-                conn.execute(f"INSERT INTO {self.target_table} SELECT * FROM _batch_df")
+                conn.execute(f"INSERT INTO {target} SELECT * FROM _batch_df")
                 conn.execute("COMMIT")
                 conn.unregister("_batch_df")
             except Exception:
