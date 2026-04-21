@@ -141,6 +141,11 @@ class NinjaTraderBridge:
         self.orders_filled: int = 0
         self.orders_rejected: int = 0
 
+        # Heartbeat health tracking
+        self._last_heartbeat_ok_ts: float = 0.0
+        self._last_heartbeat_fail_ts: float = 0.0
+        self._heartbeat_failures_total: int = 0
+
         mode_str = "PAPER" if self.paper_mode else "LIVE"
         logger.info(f"NinjaTraderBridge initialized in {mode_str} mode")
 
@@ -336,10 +341,13 @@ class NinjaTraderBridge:
             }
             ok = self._send_to_nt8(hb)
             if ok:
+                self._last_heartbeat_ok_ts = time.time()
                 if not self._connected:
                     logger.info("NT8 heartbeat OK — connection restored")
                 self._connected = True
             else:
+                self._last_heartbeat_fail_ts = time.time()
+                self._heartbeat_failures_total += 1
                 if self._connected:
                     logger.warning("NT8 heartbeat failed — connection may be lost")
                 # Don't set _connected=False here: let _recv_loop handle it
@@ -552,6 +560,40 @@ class NinjaTraderBridge:
         if self.paper_mode:
             return True
         return self._connected
+
+    def is_healthy(self) -> bool:
+        """True se heartbeat TCP è sano.
+
+        Considera sano se l'ultimo heartbeat ACK (sendall success) è avvenuto
+        entro 2x l'intervallo di heartbeat. In paper mode ritorna sempre True.
+        """
+        if self.paper_mode:
+            return True
+        if not self._connected:
+            return False
+        if self._last_heartbeat_ok_ts == 0.0:
+            # Nessun heartbeat ancora inviato — non bloccante al boot
+            return True
+        age = time.time() - self._last_heartbeat_ok_ts
+        return age <= (self.heartbeat_interval * 2)
+
+    def get_heartbeat_status(self) -> dict[str, Any]:
+        """Ritorna stato heartbeat per monitoring."""
+        now = time.time()
+        return {
+            "connected": self._connected,
+            "healthy": self.is_healthy(),
+            "last_ok_age_sec": (
+                round(now - self._last_heartbeat_ok_ts, 1)
+                if self._last_heartbeat_ok_ts else None
+            ),
+            "last_fail_age_sec": (
+                round(now - self._last_heartbeat_fail_ts, 1)
+                if self._last_heartbeat_fail_ts else None
+            ),
+            "failures_total": self._heartbeat_failures_total,
+            "interval_sec": self.heartbeat_interval,
+        }
 
     def get_position(self) -> dict[str, Any]:
         """Ritorna stato posizione corrente."""

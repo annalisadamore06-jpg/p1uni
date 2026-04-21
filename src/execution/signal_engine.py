@@ -252,6 +252,21 @@ class SignalEngine:
                     rec.reason = "V3.5 Bridge returned None (no features)"
                     return self._finalize(rec, t0)
 
+                # Live data staleness hard gate: se i dati GEX/features
+                # hanno piu' di `max_live_data_age_sec` di eta', blocca il
+                # trade (no live = no edge). Default 120s.
+                max_age = float(self.config.get("execution", {}).get(
+                    "max_live_data_age_sec", 120.0
+                ))
+                live_age = float(getattr(self.v35_bridge, "_live_data_age_sec", 9999.0))
+                if live_age > max_age:
+                    rec.step_reached = 3
+                    rec.action_taken = "BLOCKED"
+                    rec.reason = f"Live data stale: age={live_age:.0f}s > {max_age:.0f}s"
+                    rec.details["live_data_age_sec"] = live_age
+                    self.orders_blocked += 1
+                    return self._finalize(rec, t0)
+
                 # BUG#16 fix: spot precedenza: Databento > GEX json > 0
                 # V35Bridge popola features["spot"] dal gexbot_latest.json
                 feature_dict_temp = prediction.get("features", {})

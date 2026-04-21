@@ -277,6 +277,9 @@ class P1UniSystem:
         logger.info(f"  Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
         logger.info("=" * 60)
 
+        # Morning readiness check (best-effort, non-bloccante)
+        self._run_morning_check()
+
         self._components["telegram"].send_alert(
             f"P1UNI starting in {self.mode.upper()} mode", "INFO"
         )
@@ -320,6 +323,13 @@ class P1UniSystem:
         else:
             logger.info("gexbot_scraper DISABLED via config (gexbot.scraper_enabled=false)")
 
+        # Thread: nightly data harvest scheduler (dopo 22:00 UTC, 1/giorno)
+        if self.config.get("system", {}).get("nightly_harvest_enabled", True):
+            t_harvest = threading.Thread(
+                target=self._run_nightly_harvest, name="nightly-harvest", daemon=True
+            )
+            self._threads.append(t_harvest)
+
         # Avvia tutti
         for t in self._threads:
             t.start()
@@ -349,6 +359,92 @@ class P1UniSystem:
             # ma se crasha completamente il thread lo riavvia)
             if not self._shutdown_event.is_set():
                 self._shutdown_event.wait(10)
+
+    def _run_morning_check(self) -> None:
+        """Esegue scripts/morning_check.py al boot. Non-bloccante su errori."""
+        base_dir = Path(self.config.get("_base_dir", "."))
+        script_path = base_dir / "scripts" / "morning_check.py"
+        if not script_path.exists():
+            logger.warning(f"morning_check.py not found: {script_path}")
+            return
+        try:
+            logger.info("Running morning readiness check...")
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                cwd=str(base_dir),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                logger.info("Morning check OK")
+            else:
+                logger.warning(
+                    f"Morning check exited rc={result.returncode} "
+                    f"(non-blocking; see logs/morning_check.log)"
+                )
+        except subprocess.TimeoutExpired:
+            logger.warning("Morning check timed out (60s) — skip")
+        except Exception as e:
+            logger.warning(f"Morning check failed: {e} — skip")
+
+    def _run_nightly_harvest(self) -> None:
+        """Scheduler per scripts/nightly_data_harvest.py.
+
+        Esegue l'harvest una volta al giorno dopo le 22:00 UTC. Usa la data
+        come chiave di deduplicazione per evitare run multipli nella stessa
+        giornata.
+        """
+        base_dir = Path(self.config.get("_base_dir", "."))
+        script_path = base_dir / "scripts" / "nightly_data_harvest.py"
+        if not script_path.exists():
+            logger.warning(f"nightly_data_harvest.py not found: {script_path}")
+            return
+
+        harvest_hour_utc = int(self.config.get("system", {}).get("harvest_hour_utc", 22))
+        last_run_date: Any = None
+        log_dir = base_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "nightly_harvest.log"
+
+        logger.info(
+            f"Nightly harvest scheduler started "
+            f"(fires after {harvest_hour_utc:02d}:00 UTC daily)"
+        )
+
+        while not self._shutdown_event.is_set():
+            self._shutdown_event.wait(60)
+            if self._shutdown_event.is_set():
+                break
+
+            now = datetime.now(timezone.utc)
+            today = now.date()
+
+            if now.hour < harvest_hour_utc:
+                continue
+            if last_run_date == today:
+                continue
+
+            logger.info(f"Launching nightly data harvest (date={today})")
+            try:
+                with open(log_path, "ab", buffering=0) as logf:
+                    proc = subprocess.Popen(
+                        [sys.executable, str(script_path), "--days", "1"],
+                        cwd=str(base_dir),
+                        stdout=logf,
+                        stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
+                    )
+                last_run_date = today
+                logger.info(f"Nightly harvest spawned (pid={proc.pid}, log={log_path})")
+            except Exception as e:
+                logger.error(f"Failed to spawn nightly harvest: {e}")
+                try:
+                    self._components["telegram"].send_alert(
+                        f"Nightly harvest spawn failed: {e}", "ERROR"
+                    )
+                except Exception:
+                    pass
 
     def _spawn_gexbot_scraper(self) -> subprocess.Popen | None:
         """Spawn del processo gexbot_scraper.py come subprocess detached."""
