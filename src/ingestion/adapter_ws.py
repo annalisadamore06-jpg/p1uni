@@ -165,7 +165,14 @@ class GexBotWebSocketAdapter(BaseAdapter):
         self._decompress_orderflow = decompress_orderflow_message
 
         self._log.info("Negotiating with GexBot API...")
-        resp = requests.get(NEGOTIATE_URL, headers={"Authorization": f"Basic {self.api_key}"}, timeout=10)
+        resp = requests.get(
+            NEGOTIATE_URL,
+            headers={
+                "Authorization": f"Basic {self.api_key}",
+                "Accept-Encoding": "gzip",
+            },
+            timeout=10,
+        )
         resp.raise_for_status()
         data = resp.json()
 

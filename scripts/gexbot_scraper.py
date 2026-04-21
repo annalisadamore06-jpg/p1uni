@@ -288,7 +288,10 @@ def main() -> None:
     ensure_db(conn)
 
     session = requests.Session()
-    session.headers.update({"Authorization": f"Basic {gex_key}"})
+    session.headers.update({
+        "Authorization": f"Basic {gex_key}",
+        "Accept-Encoding": "gzip",
+    })
 
     iteration = 0
     try:
