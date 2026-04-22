@@ -454,11 +454,13 @@ class DatabentoAdapter(BaseAdapter):
     # Override _write_to_db per INSERT specifico trades_live
     # ============================================================
 
-    def _write_to_db(self, df: Any) -> None:
+    def _write_to_db(self, df: Any, table: str | None = None) -> None:
         """Scrive il DataFrame in trades_live.
 
         Override per gestire le colonne specifiche di trades_live
-        e aggiungere ingested_at.
+        e aggiungere ingested_at. `table` is accepted to match the
+        base-class signature but ignored (databento writes only to
+        trades_live).
         """
         # B1: ingested_at incluso esplicitamente
         expected_cols = [
