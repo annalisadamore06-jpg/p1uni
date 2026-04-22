@@ -287,6 +287,15 @@ class P1UniSystem:
         # Avvia NinjaBridge
         self._components["bridge"].start()
 
+        # ============================================================
+        # Startup order:
+        #   1. Adapters + monitor + session ticker + scraper + harvest
+        #   2. Wait up to 60s for scraper to prime gexbot_latest.json
+        #   3. Start signal engine (so its first on_tick has live GEX data)
+        # Without the wait, the first 1-2 on_tick() calls are wasted because
+        # V35Bridge has no features until the scraper writes gexbot_latest.json.
+        # ============================================================
+
         # Thread: adapters
         for name in ("adapter_ws", "adapter_p1", "adapter_db"):
             adapter = self._components.get(name)
@@ -306,16 +315,11 @@ class P1UniSystem:
         )
         self._threads.append(t_session)
 
-        # Thread: signal engine loop
-        t_signal = threading.Thread(
-            target=self._run_signal_loop, name="signal-engine", daemon=True
-        )
-        self._threads.append(t_signal)
-
-        # Thread: gexbot_scraper supervisor (7° thread)
+        # Thread: gexbot_scraper supervisor (started BEFORE signal engine)
         # Spawn subprocess scripts/gexbot_scraper.py e monitor health su
         # data/gexbot_latest.json (stale >90s = restart; max 5/h).
-        if self.config.get("gexbot", {}).get("scraper_enabled", True):
+        scraper_enabled = self.config.get("gexbot", {}).get("scraper_enabled", True)
+        if scraper_enabled:
             t_scraper = threading.Thread(
                 target=self._run_gexbot_scraper, name="gexbot-scraper", daemon=True
             )
@@ -330,10 +334,24 @@ class P1UniSystem:
             )
             self._threads.append(t_harvest)
 
-        # Avvia tutti
+        # Start the non-signal-engine threads first
         for t in self._threads:
             t.start()
             logger.info(f"Thread started: {t.name}")
+
+        # Primer wait: give scraper up to 60s to write gexbot_latest.json.
+        # Non-blocking: if it doesn't show, signal loop's max_live_data_age_sec
+        # gate (120s default) will reject trades until data is fresh.
+        if scraper_enabled:
+            self._wait_for_scraper_primer(timeout_sec=60)
+
+        # Thread: signal engine loop (starts AFTER scraper primer)
+        t_signal = threading.Thread(
+            target=self._run_signal_loop, name="signal-engine", daemon=True
+        )
+        self._threads.append(t_signal)
+        t_signal.start()
+        logger.info(f"Thread started: {t_signal.name}")
 
         self._started = True
         logger.info(f"All {len(self._threads)} threads started. System running.")
@@ -445,6 +463,38 @@ class P1UniSystem:
                     )
                 except Exception:
                     pass
+
+    def _wait_for_scraper_primer(self, timeout_sec: int = 60) -> None:
+        """Attende la prima scrittura di data/gexbot_latest.json.
+
+        Non-bloccante: se il file non appare entro timeout_sec, logga warning
+        e prosegue. Il signal engine rispettera' comunque il gate
+        max_live_data_age_sec (default 120s) e bloccera' i trade finche' i
+        dati non sono freschi.
+        """
+        base_dir = Path(self.config.get("_base_dir", "."))
+        latest_path = base_dir / "data" / "gexbot_latest.json"
+        logger.info(f"Waiting up to {timeout_sec}s for scraper primer ({latest_path.name})...")
+        start = time.time()
+        while (time.time() - start) < timeout_sec:
+            if latest_path.exists():
+                age = time.time() - latest_path.stat().st_mtime
+                # Consideriamo "primerato" se e' stato toccato nell'ultimo
+                # ciclo (max 90s) per evitare di considerare valido un file
+                # vecchio dell'esecuzione precedente.
+                if age <= 90:
+                    logger.info(
+                        f"Scraper primer OK: {latest_path.name} "
+                        f"(age={age:.1f}s) after {time.time() - start:.1f}s"
+                    )
+                    return
+            if self._shutdown_event.is_set():
+                return
+            self._shutdown_event.wait(2.0)
+        logger.warning(
+            f"Scraper primer TIMEOUT: {latest_path.name} not fresh after "
+            f"{timeout_sec}s — proceeding (signal engine will gate on staleness)"
+        )
 
     def _spawn_gexbot_scraper(self) -> subprocess.Popen | None:
         """Spawn del processo gexbot_scraper.py come subprocess detached."""
