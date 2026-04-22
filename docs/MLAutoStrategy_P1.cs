@@ -315,12 +315,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             double putWall   = gexLevels != null ? GetDouble(gexLevels["put_wall"], 0)   : GetDouble(gexCache["put_wall"], 0);
             double zeroGamma = gexLevels != null ? GetDouble(gexLevels["zero_gamma"], 0) : GetDouble(gexCache["zero_gamma"], 0);
 
-            // Real JSON key is "regime" with values POSITIVE_GAMMA / NEGATIVE_GAMMA.
-            // Older format used "gex_regime" lowercase (positive/negative). Handle both.
+            // Real JSON key is "regime" — ninja_bridge_enhanced.py emits
+            // LONG_GAMMA / SHORT_GAMMA / UNKNOWN. Legacy writers used
+            // POSITIVE_GAMMA / NEGATIVE_GAMMA or "gex_regime" lowercase.
             string regimeRaw = gexCache["regime"] != null ? gexCache["regime"].ToString()
-                             : (gexCache["gex_regime"] != null ? gexCache["gex_regime"].ToString() : "neutral");
-            string regime = regimeRaw == "POSITIVE_GAMMA" ? "positive" :
-                            regimeRaw == "NEGATIVE_GAMMA" ? "negative" :
+                             : (gexCache["gex_regime"] != null ? gexCache["gex_regime"].ToString() : "UNKNOWN");
+            string regime = (regimeRaw == "LONG_GAMMA"     || regimeRaw == "POSITIVE_GAMMA" || regimeRaw == "positive") ? "positive" :
+                            (regimeRaw == "SHORT_GAMMA"    || regimeRaw == "NEGATIVE_GAMMA" || regimeRaw == "negative") ? "negative" :
                             regimeRaw;
 
             if (callWall > 0 && side == "LONG" && price > callWall - 3.0)
