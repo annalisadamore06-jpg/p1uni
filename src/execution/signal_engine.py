@@ -371,6 +371,12 @@ class SignalEngine:
                             rec.details["hedging_rule"] = h_dec.rule
                             rec.details["hedging_reason"] = h_dec.reason
                             rec.details["ml_skip_reason"] = ml_rejection_reason
+                            # Per-signal exit params (R5 trailing stop — Phase 4)
+                            hf = h_dec.features or {}
+                            if "r5_sl_pts" in hf:
+                                rec.details["hedging_sl_pts"] = hf["r5_sl_pts"]
+                            if "r5_trail_pts" in hf:
+                                rec.details["hedging_trail_pts"] = hf["r5_trail_pts"]
                             logger.info(
                                 "HEDGING TAKEOVER: ML skipped (%s), %s fires | %s",
                                 ml_rejection_reason, h_dec.rule, h_dec.reason,
@@ -424,8 +430,21 @@ class SignalEngine:
             # Calculate SL/TP
             vol = feature_dict.get("vol_5min", 0.0004)
             sl, tp = self._calculate_stop_loss(signal, spot, vol)
+            # Hedging layer (R5) uses its own optimized SL + trailing stop
+            # (Phase 4: trail=4pt / SL=10pt, research/results_v2/R5_OPT/).
+            trail_pts = 0.0
+            if signal_source == "hedging":
+                h_sl_pts = rec.details.get("hedging_sl_pts")
+                h_trail_pts = rec.details.get("hedging_trail_pts")
+                if h_sl_pts is not None:
+                    sl = round(spot + h_sl_pts, 2) if signal == "SHORT" \
+                        else round(spot - h_sl_pts, 2)
+                if h_trail_pts is not None:
+                    trail_pts = float(h_trail_pts)
             rec.sl = sl
             rec.tp = tp
+            if trail_pts > 0:
+                rec.details["trail_pts"] = trail_pts
 
             # Position size dinamica
             size = self.risk_mgr.calculate_position_size(confidence, vol)
@@ -466,7 +485,8 @@ class SignalEngine:
             # Passa raw_probability (avg_proba 0-1) al bridge per NT8 confidence check
             raw_prob = prediction.get("probabilities", {}).get("raw", 0.0)
             order_result = self.bridge.send_order(
-                signal, size, sl, tp, price=spot, raw_probability=raw_prob
+                signal, size, sl, tp, price=spot, raw_probability=raw_prob,
+                trail_pts=trail_pts,
             )
 
             if order_result["success"]:

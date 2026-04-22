@@ -1,23 +1,38 @@
 """
 hedging_signals.py - Dealer-hedging-based signals (parallel layer to ML v3.5).
 
-Based on the P1UNI 6-month backtest study (research/results/VALIDATION/).
+Based on the P1UNI 6-month backtest study (research/results/VALIDATION/) and
+the Phase 4 deep-optimization study (research/results_v2/R5_OPT/, 2026-04-22).
 Only rules that survived walk-forward OOS validation with 1pt slippage are
 implemented here.
 
-VALIDATED (2026-04-22):
-    R5  Above Call Wall -> SHORT (mean reversion)
-          n_test=15, total=+20.75pt, mean=+1.38pt/trade net of slippage
-          Rationale: when spot trades above the call-wall (zone where dealer
-          aggregated gamma peaks on the call side), dealers are structurally
-          long gamma on the upside and must SELL to hedge. Mean reversion
-          toward call_wall results.
+VALIDATED — R5 (Above Call Wall -> SHORT, mean reversion)
+    Phase 2 baseline (fixed TP=12 / SL=8 / buffer=0):
+        n_test=15, total=+20.75pt, mean=+1.38pt/trade, Sharpe=0.16
+    Phase 4 optimized (trail=4 / SL=10 / buffer=10 / cooldown=12 bars = 60min):
+        n_test=13, total=+36.53pt, mean=+2.81pt/trade, Sharpe=0.24, WR=54%
+        (research/results_v2/R5_OPT/summary.json -> trail_best_on_test)
+    Rationale: when spot trades above the call-wall (zone where dealer
+    aggregated gamma peaks on the call side), dealers are structurally
+    long gamma on the upside and must SELL to hedge. Mean reversion
+    toward call_wall results. Trailing stop captures the full move without
+    giving profit back; wider SL avoids stopping out on the initial
+    breakout overshoot.
 
 REJECTED (not implemented) — see research/results/VALIDATION/ for details:
     R1  drr_z >= +2 AND regime=TRANSITION  -> SHORT   (too few OOS trades)
     R2  gex_skew < -0.5 AND non-TRANS       -> SHORT   (OOS negative)
     R3  Fade CW in PINNING                  -> SHORT   (overfit on train)
     R4  CW breakout in AMP + aligned        -> LONG    (too few OOS trades)
+
+ARCHITECTURE NOTE — trailing stop:
+    The HedgingSignalEngine only emits the entry signal. The trailing-stop
+    semantics (trail=4pt from best excursion, hard SL at 10pt) are attached
+    to the decision via `features["r5_sl_pts"]` and `features["r5_trail_pts"]`.
+    The SignalEngine forwards these as order hints to the NT8 bridge
+    (sl_hint, trail_hint). Actual enforcement happens on the NT8 side —
+    the NT8 strategy must read trail_hint and manage the trailing stop.
+    TODO(NT8): update P1 strategy to honor trail_hint when layer="hedging".
 
 Rules are computed on each tick. The HedgingSignalEngine emits a directional
 signal with its own "confidence" (fixed, calibrated to pass NT8 MIN_CONFIDENCE
@@ -30,9 +45,11 @@ Config (settings.yaml):
     hedging_signals:
         enabled: true
         r5_enabled: true
-        r5_margin_pts: 0.0        # min points above CW to trigger
+        r5_margin_pts: 10.0       # entry buffer above CW (Phase 4 optimized)
+        r5_sl_pts: 10.0           # hard stop loss distance (pts)
+        r5_trail_pts: 4.0         # trailing stop distance from best excursion
         r5_confidence: 0.65       # conf reported to risk/NT8 gates
-        r5_cooldown_sec: 900      # minimum gap between R5 fires
+        r5_cooldown_sec: 3600     # min gap between R5 fires (~60min = 12 bars)
 """
 from __future__ import annotations
 
@@ -77,11 +94,13 @@ class HedgingSignalEngine:
         hc = config.get("hedging_signals", {}) or {}
         self.enabled: bool = bool(hc.get("enabled", True))
 
-        # R5: Above Call Wall -> SHORT
+        # R5: Above Call Wall -> SHORT (Phase 4 optimized defaults)
         self.r5_enabled: bool = bool(hc.get("r5_enabled", True))
-        self.r5_margin_pts: float = float(hc.get("r5_margin_pts", 0.0))
+        self.r5_margin_pts: float = float(hc.get("r5_margin_pts", 10.0))
+        self.r5_sl_pts: float = float(hc.get("r5_sl_pts", 10.0))
+        self.r5_trail_pts: float = float(hc.get("r5_trail_pts", 4.0))
         self.r5_confidence: float = float(hc.get("r5_confidence", 0.65))
-        self.r5_cooldown_sec: float = float(hc.get("r5_cooldown_sec", 900))
+        self.r5_cooldown_sec: float = float(hc.get("r5_cooldown_sec", 3600))
 
         # State for edge detection
         self._r5_was_above: bool = False
@@ -94,8 +113,10 @@ class HedgingSignalEngine:
 
         logger.info(
             "HedgingSignalEngine initialized: enabled=%s r5_enabled=%s "
-            "r5_margin_pts=%.2f r5_confidence=%.2f r5_cooldown_sec=%.0f",
+            "r5_margin_pts=%.2f r5_sl_pts=%.2f r5_trail_pts=%.2f "
+            "r5_confidence=%.2f r5_cooldown_sec=%.0f",
             self.enabled, self.r5_enabled, self.r5_margin_pts,
+            self.r5_sl_pts, self.r5_trail_pts,
             self.r5_confidence, self.r5_cooldown_sec,
         )
 
@@ -174,17 +195,28 @@ class HedgingSignalEngine:
         self._r5_last_fire_ts = now_m
         self.r5_fires += 1
         logger.info(
-            "HEDGING R5 fired: SHORT | spot=%.2f > CW=%.2f (+%.2f margin)",
+            "HEDGING R5 fired: SHORT | spot=%.2f > CW=%.2f (+%.2f buf) "
+            "| sl=%.1fpt trail=%.1fpt",
             spot, cw, self.r5_margin_pts,
+            self.r5_sl_pts, self.r5_trail_pts,
         )
         return HedgingDecision(
             signal="SHORT",
             confidence=self.r5_confidence,
             rule="R5_aboveCW_short",
-            reason=f"R5: spot {spot:.2f} crossed above CW {cw:.2f}+{self.r5_margin_pts:.1f}",
-            features={"spot": spot, "call_wall_oi": cw,
-                       "put_wall_oi": _sf(features.get("put_wall_oi")),
-                       "zero_gamma": _sf(features.get("zero_gamma"))},
+            reason=(f"R5: spot {spot:.2f} crossed above CW {cw:.2f}+"
+                    f"{self.r5_margin_pts:.1f} (sl={self.r5_sl_pts:.1f}pt, "
+                    f"trail={self.r5_trail_pts:.1f}pt)"),
+            features={
+                "spot": spot,
+                "call_wall_oi": cw,
+                "put_wall_oi": _sf(features.get("put_wall_oi")),
+                "zero_gamma": _sf(features.get("zero_gamma")),
+                # Exit parameters for SignalEngine / NT8 bridge
+                "r5_sl_pts": self.r5_sl_pts,
+                "r5_trail_pts": self.r5_trail_pts,
+                "r5_margin_pts": self.r5_margin_pts,
+            },
         )
 
     # ---- Status ---------------------------------------------------------
@@ -192,6 +224,9 @@ class HedgingSignalEngine:
         return {
             "enabled": self.enabled,
             "r5_enabled": self.r5_enabled,
+            "r5_margin_pts": self.r5_margin_pts,
+            "r5_sl_pts": self.r5_sl_pts,
+            "r5_trail_pts": self.r5_trail_pts,
             "ticks_processed": self.ticks_processed,
             "signals_emitted": self.signals_emitted,
             "r5_fires": self.r5_fires,

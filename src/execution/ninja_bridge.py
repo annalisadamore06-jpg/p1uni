@@ -390,6 +390,7 @@ class NinjaTraderBridge:
         tp: float,
         price: float = 0.0,
         raw_probability: float = 0.0,
+        trail_pts: float = 0.0,
     ) -> dict[str, Any]:
         """Invia un segnale di trading a NinjaTrader.
 
@@ -400,6 +401,9 @@ class NinjaTraderBridge:
             tp: Take profit (informativo; NT8 usa i suoi livelli P1-Lite)
             price: Prezzo corrente (per logging)
             raw_probability: avg_proba grezza dal modello (0-1). Usata come confidence per NT8.
+            trail_pts: Trailing-stop distance in points (0 = no trailing, fixed TP/SL).
+                Set by hedging layer R5 (Phase 4 optimized = 4.0pt). NT8 strategy
+                must honor this hint when non-zero — see hedging_signals.py docstring.
 
         Returns:
             Dict con risultato: {success, order_id, fill_price, message}
@@ -429,6 +433,7 @@ class NinjaTraderBridge:
             "qty": size,
             "sl_hint": round(sl, 2),   # informativo
             "tp_hint": round(tp, 2),   # informativo
+            "trail_hint": round(float(trail_pts), 2),  # 0 = no trailing; R5 uses 4.0pt
             "entry_price": round(effective_price, 2),
         }
 
