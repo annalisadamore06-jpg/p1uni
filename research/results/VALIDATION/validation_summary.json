@@ -1,0 +1,276 @@
+{
+  "config": {
+    "TP": 12.0,
+    "SL": 8.0,
+    "timeout_bars": 6,
+    "slippage_pt": 1.0,
+    "train_frac": 0.7,
+    "roll_days": 20
+  },
+  "data": {
+    "bars_total": 8220,
+    "days_total": 123,
+    "date_min": "2025-10-02",
+    "date_max": "2026-04-01"
+  },
+  "rules": [
+    {
+      "rule": "R1_drr_shortInTrans",
+      "param_name": "drr_z_thresh",
+      "best_train_param": 2.25,
+      "train_best": {
+        "n": 0,
+        "total_pt": 0,
+        "mean_pt": 0,
+        "win_rate": 0,
+        "sharpe": 0,
+        "tp_rate": 0,
+        "sl_rate": 0,
+        "max_dd": 0,
+        "split": "TRAIN",
+        "param": 2.25
+      },
+      "test_best": {
+        "n": 1,
+        "total_pt": 11.0,
+        "mean_pt": 11.0,
+        "win_rate": 1.0,
+        "sharpe": NaN,
+        "tp_rate": 1.0,
+        "sl_rate": 0.0,
+        "max_dd": 0.0,
+        "split": "TEST",
+        "param": 2.25
+      },
+      "test_default": {
+        "n": 5,
+        "total_pt": -18.25,
+        "mean_pt": -3.65,
+        "win_rate": 0.2,
+        "sharpe": -0.4197551813367268,
+        "tp_rate": 0.2,
+        "sl_rate": 0.6,
+        "max_dd": 27.0,
+        "split": "TEST_DEFAULT",
+        "param": 2.0
+      },
+      "verdict": "FAIL (too few OOS trades n<10)"
+    },
+    {
+      "rule": "R2_skew_shortNonTrans",
+      "param_name": "skew_thresh",
+      "best_train_param": -0.7,
+      "train_best": {
+        "n": 28,
+        "total_pt": -1.0,
+        "mean_pt": -0.03571428571428571,
+        "win_rate": 0.4642857142857143,
+        "sharpe": -0.0044712914569150575,
+        "tp_rate": 0.2857142857142857,
+        "sl_rate": 0.21428571428571427,
+        "max_dd": 36.25,
+        "split": "TRAIN",
+        "param": -0.7
+      },
+      "test_best": {
+        "n": 0,
+        "total_pt": 0,
+        "mean_pt": 0,
+        "win_rate": 0,
+        "sharpe": 0,
+        "tp_rate": 0,
+        "sl_rate": 0,
+        "max_dd": 0,
+        "split": "TEST",
+        "param": -0.7
+      },
+      "test_default": {
+        "n": 15,
+        "total_pt": -30.75,
+        "mean_pt": -2.05,
+        "win_rate": 0.26666666666666666,
+        "sharpe": -0.26726773147867583,
+        "tp_rate": 0.13333333333333333,
+        "sl_rate": 0.4,
+        "max_dd": 36.5,
+        "split": "TEST_DEFAULT",
+        "param": -0.5
+      },
+      "verdict": "FAIL (OOS negative, mean=-2.05pt)"
+    },
+    {
+      "rule": "R3_CW_fadePinning",
+      "param_name": "touch_band",
+      "best_train_param": 6.0,
+      "train_best": {
+        "n": 68,
+        "total_pt": -41.5,
+        "mean_pt": -0.6102941176470589,
+        "win_rate": 0.4117647058823529,
+        "sharpe": -0.09733866161337293,
+        "tp_rate": 0.1323529411764706,
+        "sl_rate": 0.17647058823529413,
+        "max_dd": 74.5,
+        "split": "TRAIN",
+        "param": 6.0
+      },
+      "test_best": {
+        "n": 5,
+        "total_pt": -22.5,
+        "mean_pt": -4.5,
+        "win_rate": 0.2,
+        "sharpe": -0.515338500823465,
+        "tp_rate": 0.2,
+        "sl_rate": 0.6,
+        "max_dd": 18.0,
+        "split": "TEST",
+        "param": 6.0
+      },
+      "test_default": {
+        "n": 3,
+        "total_pt": -27.0,
+        "mean_pt": -9.0,
+        "win_rate": 0.0,
+        "sharpe": -9000000000.0,
+        "tp_rate": 0.0,
+        "sl_rate": 1.0,
+        "max_dd": 18.0,
+        "split": "TEST_DEFAULT",
+        "param": 3.0
+      },
+      "verdict": "FAIL (too few OOS trades n<10)"
+    },
+    {
+      "rule": "R4_CW_breakoutAmp",
+      "param_name": "align_min",
+      "best_train_param": 6,
+      "train_best": {
+        "n": 0,
+        "total_pt": 0,
+        "mean_pt": 0,
+        "win_rate": 0,
+        "sharpe": 0,
+        "tp_rate": 0,
+        "sl_rate": 0,
+        "max_dd": 0,
+        "split": "TRAIN",
+        "param": 6
+      },
+      "test_best": {
+        "n": 0,
+        "total_pt": 0,
+        "mean_pt": 0,
+        "win_rate": 0,
+        "sharpe": 0,
+        "tp_rate": 0,
+        "sl_rate": 0,
+        "max_dd": 0,
+        "split": "TEST",
+        "param": 6
+      },
+      "test_default": {
+        "n": 2,
+        "total_pt": 14.25,
+        "mean_pt": 7.125,
+        "win_rate": 1.0,
+        "sharpe": 1.3001640812993023,
+        "tp_rate": 0.5,
+        "sl_rate": 0.0,
+        "max_dd": 0.0,
+        "split": "TEST_DEFAULT",
+        "param": 5
+      },
+      "verdict": "FAIL (too few OOS trades n<10)"
+    },
+    {
+      "rule": "R5_aboveCW_short",
+      "param_name": "margin",
+      "best_train_param": 2.0,
+      "train_best": {
+        "n": 39,
+        "total_pt": 40.5,
+        "mean_pt": 1.0384615384615385,
+        "win_rate": 0.41025641025641024,
+        "sharpe": 0.19383450490680804,
+        "tp_rate": 0.15384615384615385,
+        "sl_rate": 0.0,
+        "max_dd": 20.5,
+        "split": "TRAIN",
+        "param": 2.0
+      },
+      "test_best": {
+        "n": 12,
+        "total_pt": 12.0,
+        "mean_pt": 1.0,
+        "win_rate": 0.5,
+        "sharpe": 0.09574271076646715,
+        "tp_rate": 0.5,
+        "sl_rate": 0.5,
+        "max_dd": 27.0,
+        "split": "TEST",
+        "param": 2.0
+      },
+      "test_default": {
+        "n": 15,
+        "total_pt": 20.75,
+        "mean_pt": 1.3833333333333333,
+        "win_rate": 0.5333333333333333,
+        "sharpe": 0.1368335332329949,
+        "tp_rate": 0.4666666666666667,
+        "sl_rate": 0.4666666666666667,
+        "max_dd": 36.0,
+        "split": "TEST_DEFAULT",
+        "param": 0.0
+      },
+      "verdict": "PASS (mean=1.38pt net)"
+    }
+  ],
+  "composite": {
+    "n": 243,
+    "total_pt": -139.0,
+    "mean_pt": -0.5720164609053497,
+    "win_rate": 0.411522633744856,
+    "sharpe": -0.07815284224887498,
+    "tp_rate": 0.19753086419753085,
+    "sl_rate": 0.26337448559670784,
+    "max_dd": 238.75
+  },
+  "overlap_matrix": {
+    "R1_drr_shortInTrans": {
+      "R1_drr_shortInTrans": 6.0,
+      "R2_skew_shortNonTrans": 0.0,
+      "R3_CW_fadePinning": 0.0,
+      "R4_CW_breakoutAmp": 0.0,
+      "R5_aboveCW_short": 0.0
+    },
+    "R2_skew_shortNonTrans": {
+      "R1_drr_shortInTrans": 0.0,
+      "R2_skew_shortNonTrans": 125.0,
+      "R3_CW_fadePinning": 1.0,
+      "R4_CW_breakoutAmp": 0.0,
+      "R5_aboveCW_short": 3.0
+    },
+    "R3_CW_fadePinning": {
+      "R1_drr_shortInTrans": 0.0,
+      "R2_skew_shortNonTrans": 1.0,
+      "R3_CW_fadePinning": 50.0,
+      "R4_CW_breakoutAmp": 0.0,
+      "R5_aboveCW_short": 9.0
+    },
+    "R4_CW_breakoutAmp": {
+      "R1_drr_shortInTrans": 0.0,
+      "R2_skew_shortNonTrans": 0.0,
+      "R3_CW_fadePinning": 0.0,
+      "R4_CW_breakoutAmp": 3.0,
+      "R5_aboveCW_short": 3.0
+    },
+    "R5_aboveCW_short": {
+      "R1_drr_shortInTrans": 0.0,
+      "R2_skew_shortNonTrans": 3.0,
+      "R3_CW_fadePinning": 9.0,
+      "R4_CW_breakoutAmp": 3.0,
+      "R5_aboveCW_short": 66.0
+    }
+  },
+  "elapsed_sec": 3.2
+}

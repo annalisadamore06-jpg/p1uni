@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from src.execution.session_manager import SessionManager, MarketPhase
+from src.execution.hedging_signals import HedgingSignalEngine
 
 logger = logging.getLogger("p1uni.execution.signal_engine")
 
@@ -181,6 +182,11 @@ class SignalEngine:
 
         # Macro blackout (BUG-02): blocca trade entro window da NFP/CPI/FOMC
         self._macro_events, self._macro_before_sec, self._macro_after_sec = _load_macro_blackout(config)
+
+        # Parallel dealer-hedging layer (validated rules only — see
+        # research/results/VALIDATION/ and src/execution/hedging_signals.py).
+        # Fires only when ML rejects (NEUTRAL / low-conf / DEGRADED_1).
+        self.hedging_engine = HedgingSignalEngine(config)
 
         # Anti-whipsaw: {direction: last_trade_monotonic_time}
         self._last_trade_time: dict[str, float] = {}
@@ -327,31 +333,54 @@ class SignalEngine:
             rec.details["ml_mode"] = mode
             rec.details["votes"] = prediction.get("votes", {})
 
-            # NEUTRAL = nessun trade
-            if signal == "NEUTRAL":
-                rec.step_reached = 3
-                rec.reason = "ML signal is NEUTRAL"
-                return self._finalize(rec, t0)
-
-            # Confidence minima (piu alta della fase + soglia per direzione)
+            # ML decision gates — if any of these reject, the parallel
+            # dealer-hedging layer gets a chance to take over.
             min_conf = max(
                 phase_min_conf,
                 self.min_conf_long if signal == "LONG" else self.min_conf_short,
             )
-            if confidence < min_conf:
-                rec.step_reached = 3
-                rec.reason = (
+            ml_rejection_reason: str | None = None
+            if signal == "NEUTRAL":
+                ml_rejection_reason = "ML signal is NEUTRAL"
+            elif confidence < min_conf:
+                ml_rejection_reason = (
                     f"Confidence {confidence:.3f} < min {min_conf:.3f} "
                     f"(phase={phase.value})"
                 )
-                return self._finalize(rec, t0)
+            elif mode == "DEGRADED_1":
+                ml_rejection_reason = "Ensemble in DEGRADED_1 mode (only 1 model)"
 
-            # DEGRADED_1 mode: blocca (troppo rischioso con 1 solo modello)
-            if mode == "DEGRADED_1":
-                rec.step_reached = 3
-                rec.reason = "Ensemble in DEGRADED_1 mode (only 1 model)"
-                return self._finalize(rec, t0)
+            signal_source = "ml_signals"
+            if ml_rejection_reason is not None:
+                # Try dealer-hedging fallback (R5 only — see hedging_signals.py)
+                if self.hedging_engine is not None and self.hedging_engine.enabled:
+                    h_dec = self.hedging_engine.evaluate(feature_dict)
+                    if h_dec.signal != "NEUTRAL":
+                        h_min_conf = max(
+                            phase_min_conf,
+                            self.min_conf_long if h_dec.signal == "LONG"
+                            else self.min_conf_short,
+                        )
+                        if h_dec.confidence >= h_min_conf:
+                            signal = h_dec.signal
+                            confidence = h_dec.confidence
+                            signal_source = "hedging"
+                            rec.signal = signal
+                            rec.confidence = confidence
+                            rec.details["layer"] = "hedging"
+                            rec.details["hedging_rule"] = h_dec.rule
+                            rec.details["hedging_reason"] = h_dec.reason
+                            rec.details["ml_skip_reason"] = ml_rejection_reason
+                            logger.info(
+                                "HEDGING TAKEOVER: ML skipped (%s), %s fires | %s",
+                                ml_rejection_reason, h_dec.rule, h_dec.reason,
+                            )
+                if signal_source == "ml_signals":
+                    rec.step_reached = 3
+                    rec.reason = ml_rejection_reason
+                    return self._finalize(rec, t0)
 
+            rec.details["signal_source"] = signal_source
             rec.step_reached = 3
             self.signals_generated += 1
 
@@ -654,6 +683,8 @@ class SignalEngine:
             "orders_blocked": self.orders_blocked,
             "cooldown_sec": self.cooldown_sec,
             "last_decision": self._decisions[-1] if self._decisions else None,
+            "hedging": self.hedging_engine.get_status()
+            if self.hedging_engine is not None else None,
         }
 
     def get_recent_decisions(self, n: int = 20) -> list[dict[str, Any]]:
