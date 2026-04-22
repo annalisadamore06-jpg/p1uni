@@ -165,7 +165,14 @@ class GexBotWebSocketAdapter(BaseAdapter):
         self._decompress_orderflow = decompress_orderflow_message
 
         self._log.info("Negotiating with GexBot API...")
-        resp = requests.get(NEGOTIATE_URL, headers={"Authorization": f"Basic {self.api_key}"}, timeout=10)
+        resp = requests.get(
+            NEGOTIATE_URL,
+            headers={
+                "Authorization": f"Basic {self.api_key}",
+                "Accept-Encoding": "gzip",
+            },
+            timeout=10,
+        )
         resp.raise_for_status()
         data = resp.json()
 
@@ -267,20 +274,30 @@ class GexBotWebSocketAdapter(BaseAdapter):
         return ""
 
     def _ingest_gex(self, data: dict, hub_key: str, category: str) -> None:
+        # BUG-04 fix: zero_gamma e' affidabile SOLO dal package 'classic'.
+        # Quando arriva da 'state_gex' settiamo None per evitare che il
+        # feature builder pensi di avere uno zero_gamma valido (il codice
+        # legacy metteva 0, che il v35_bridge filtra come "presente ma nullo").
+        hub = "classic" if "classic" in hub_key else "state_gex"
+        zero_gamma = data.get("zero_gamma") if hub == "classic" else None
+
         record = {
             "timestamp": data.get("timestamp"), "ticker": data.get("ticker"),
-            "spot": data.get("spot"), "zero_gamma": data.get("zero_gamma"),
+            "spot": data.get("spot"), "zero_gamma": zero_gamma,
             "call_wall_vol": data.get("major_pos_vol"), "call_wall_oi": data.get("major_pos_oi"),
             "put_wall_vol": data.get("major_neg_vol"), "put_wall_oi": data.get("major_neg_oi"),
             "net_gex_vol": data.get("sum_gex_vol"), "net_gex_oi": data.get("sum_gex_oi"),
             "delta_rr": data.get("delta_risk_reversal"),
-            "hub": "classic" if "classic" in hub_key else "state_gex",
+            "hub": hub,
             "aggregation": category,
             "n_strikes": len(data.get("strikes", [])),
             "min_dte": data.get("min_dte"), "sec_min_dte": data.get("sec_min_dte"),
         }
         self.process_message(record)
-        self._update_gex_cache(record)
+        # Il cache unica-source (usato dal v35_bridge) viene aggiornato SOLO
+        # con record 'classic' per evitare sovrascritture con zero_gamma None.
+        if hub == "classic":
+            self._update_gex_cache(record)
 
     def _ingest_greek(self, data: dict, category: str) -> None:
         parts = category.split("_")

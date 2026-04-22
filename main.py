@@ -39,9 +39,11 @@ import argparse
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -275,6 +277,9 @@ class P1UniSystem:
         logger.info(f"  Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
         logger.info("=" * 60)
 
+        # Morning readiness check (best-effort, non-bloccante)
+        self._run_morning_check()
+
         self._components["telegram"].send_alert(
             f"P1UNI starting in {self.mode.upper()} mode", "INFO"
         )
@@ -307,6 +312,24 @@ class P1UniSystem:
         )
         self._threads.append(t_signal)
 
+        # Thread: gexbot_scraper supervisor (7° thread)
+        # Spawn subprocess scripts/gexbot_scraper.py e monitor health su
+        # data/gexbot_latest.json (stale >90s = restart; max 5/h).
+        if self.config.get("gexbot", {}).get("scraper_enabled", True):
+            t_scraper = threading.Thread(
+                target=self._run_gexbot_scraper, name="gexbot-scraper", daemon=True
+            )
+            self._threads.append(t_scraper)
+        else:
+            logger.info("gexbot_scraper DISABLED via config (gexbot.scraper_enabled=false)")
+
+        # Thread: nightly data harvest scheduler (dopo 22:00 UTC, 1/giorno)
+        if self.config.get("system", {}).get("nightly_harvest_enabled", True):
+            t_harvest = threading.Thread(
+                target=self._run_nightly_harvest, name="nightly-harvest", daemon=True
+            )
+            self._threads.append(t_harvest)
+
         # Avvia tutti
         for t in self._threads:
             t.start()
@@ -336,6 +359,209 @@ class P1UniSystem:
             # ma se crasha completamente il thread lo riavvia)
             if not self._shutdown_event.is_set():
                 self._shutdown_event.wait(10)
+
+    def _run_morning_check(self) -> None:
+        """Esegue scripts/morning_check.py al boot. Non-bloccante su errori."""
+        base_dir = Path(self.config.get("_base_dir", "."))
+        script_path = base_dir / "scripts" / "morning_check.py"
+        if not script_path.exists():
+            logger.warning(f"morning_check.py not found: {script_path}")
+            return
+        try:
+            logger.info("Running morning readiness check...")
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                cwd=str(base_dir),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                logger.info("Morning check OK")
+            else:
+                logger.warning(
+                    f"Morning check exited rc={result.returncode} "
+                    f"(non-blocking; see logs/morning_check.log)"
+                )
+        except subprocess.TimeoutExpired:
+            logger.warning("Morning check timed out (60s) — skip")
+        except Exception as e:
+            logger.warning(f"Morning check failed: {e} — skip")
+
+    def _run_nightly_harvest(self) -> None:
+        """Scheduler per scripts/nightly_data_harvest.py.
+
+        Esegue l'harvest una volta al giorno dopo le 22:00 UTC. Usa la data
+        come chiave di deduplicazione per evitare run multipli nella stessa
+        giornata.
+        """
+        base_dir = Path(self.config.get("_base_dir", "."))
+        script_path = base_dir / "scripts" / "nightly_data_harvest.py"
+        if not script_path.exists():
+            logger.warning(f"nightly_data_harvest.py not found: {script_path}")
+            return
+
+        harvest_hour_utc = int(self.config.get("system", {}).get("harvest_hour_utc", 22))
+        last_run_date: Any = None
+        log_dir = base_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "nightly_harvest.log"
+
+        logger.info(
+            f"Nightly harvest scheduler started "
+            f"(fires after {harvest_hour_utc:02d}:00 UTC daily)"
+        )
+
+        while not self._shutdown_event.is_set():
+            self._shutdown_event.wait(60)
+            if self._shutdown_event.is_set():
+                break
+
+            now = datetime.now(timezone.utc)
+            today = now.date()
+
+            if now.hour < harvest_hour_utc:
+                continue
+            if last_run_date == today:
+                continue
+
+            logger.info(f"Launching nightly data harvest (date={today})")
+            try:
+                with open(log_path, "ab", buffering=0) as logf:
+                    proc = subprocess.Popen(
+                        [sys.executable, str(script_path), "--days", "1"],
+                        cwd=str(base_dir),
+                        stdout=logf,
+                        stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
+                    )
+                last_run_date = today
+                logger.info(f"Nightly harvest spawned (pid={proc.pid}, log={log_path})")
+            except Exception as e:
+                logger.error(f"Failed to spawn nightly harvest: {e}")
+                try:
+                    self._components["telegram"].send_alert(
+                        f"Nightly harvest spawn failed: {e}", "ERROR"
+                    )
+                except Exception:
+                    pass
+
+    def _spawn_gexbot_scraper(self) -> subprocess.Popen | None:
+        """Spawn del processo gexbot_scraper.py come subprocess detached."""
+        base_dir = Path(self.config.get("_base_dir", "."))
+        script_path = base_dir / "scripts" / "gexbot_scraper.py"
+        if not script_path.exists():
+            logger.error(f"gexbot_scraper.py not found: {script_path}")
+            return None
+        log_dir = base_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "gexbot_scraper.log"
+        try:
+            logf = open(log_path, "ab", buffering=0)
+            proc = subprocess.Popen(
+                [sys.executable, str(script_path)],
+                cwd=str(base_dir),
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+            )
+            logger.info(f"gexbot_scraper spawned (pid={proc.pid}, log={log_path})")
+            return proc
+        except Exception as e:
+            logger.error(f"Failed to spawn gexbot_scraper: {e}")
+            return None
+
+    def _run_gexbot_scraper(self) -> None:
+        """Supervisore gexbot_scraper: spawn subprocess, health-check ogni 30s
+        sull'età di data/gexbot_latest.json (<90s), auto-restart, max 5/ora.
+        """
+        base_dir = Path(self.config.get("_base_dir", "."))
+        latest_path = base_dir / "data" / "gexbot_latest.json"
+        check_interval_sec = 30
+        stale_threshold_sec = 90
+        max_restarts_per_hour = 5
+        grace_after_spawn_sec = 45  # tempo per la prima scrittura del JSON
+
+        restart_times: deque[float] = deque()
+        proc: subprocess.Popen | None = self._spawn_gexbot_scraper()
+        self._components["gexbot_scraper_proc"] = proc
+        last_spawn_ts = time.time() if proc else 0.0
+
+        while not self._shutdown_event.is_set():
+            self._shutdown_event.wait(check_interval_sec)
+            if self._shutdown_event.is_set():
+                break
+
+            now = time.time()
+            # Purge restart timestamps oltre 1 ora
+            while restart_times and now - restart_times[0] > 3600:
+                restart_times.popleft()
+
+            proc_alive = proc is not None and proc.poll() is None
+
+            # Età file dati
+            file_age = None
+            if latest_path.exists():
+                try:
+                    file_age = now - latest_path.stat().st_mtime
+                except OSError:
+                    file_age = None
+
+            in_grace = (now - last_spawn_ts) < grace_after_spawn_sec
+            stale = (file_age is None or file_age > stale_threshold_sec) and not in_grace
+
+            if proc_alive and not stale:
+                continue
+
+            # Rate limit
+            if len(restart_times) >= max_restarts_per_hour:
+                oldest_age_min = (now - restart_times[0]) / 60.0
+                logger.error(
+                    f"gexbot_scraper restart rate-limited "
+                    f"(5/h reached; oldest {oldest_age_min:.1f}m ago)"
+                )
+                try:
+                    self._components["telegram"].send_alert(
+                        "gexbot_scraper: restart limit 5/h raggiunto — intervento manuale",
+                        "ERROR",
+                    )
+                except Exception:
+                    pass
+                continue
+
+            if not proc_alive:
+                logger.warning("gexbot_scraper process dead — restart")
+            else:
+                logger.warning(
+                    f"gexbot_scraper stale (file age={file_age}) — restart"
+                )
+                try:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=3)
+                except Exception as e:
+                    logger.error(f"Error terminating gexbot_scraper: {e}")
+
+            proc = self._spawn_gexbot_scraper()
+            self._components["gexbot_scraper_proc"] = proc
+            last_spawn_ts = time.time()
+            restart_times.append(last_spawn_ts)
+
+        # Shutdown: termina il subprocess
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.error(f"gexbot_scraper shutdown terminate error: {e}")
 
     def _run_monitor(self) -> None:
         """Esegue il system monitor."""
@@ -449,6 +675,22 @@ class P1UniSystem:
                     logger.info(f"  {name} stopped")
                 except Exception as e:
                     logger.error(f"  {name} stop error: {e}")
+
+        # Step 3b: Ferma gexbot_scraper subprocess (il thread supervisor
+        # termina il proc quando _shutdown_event è settato; qui facciamo da
+        # safety-net se per qualche motivo è ancora vivo)
+        scraper_proc = self._components.get("gexbot_scraper_proc")
+        if scraper_proc is not None:
+            try:
+                if scraper_proc.poll() is None:
+                    scraper_proc.terminate()
+                    try:
+                        scraper_proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        scraper_proc.kill()
+                    logger.info("  gexbot_scraper stopped")
+            except Exception as e:
+                logger.error(f"  gexbot_scraper stop error: {e}")
 
         # Step 4: Ferma monitor
         logger.info("[4/6] Stopping monitor...")

@@ -36,14 +36,57 @@ CONFIGURAZIONE (settings.yaml):
 
 from __future__ import annotations
 
+import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from src.execution.session_manager import SessionManager, MarketPhase
 
 logger = logging.getLogger("p1uni.execution.signal_engine")
+
+
+def _load_macro_blackout(config: dict[str, Any]) -> tuple[list[tuple[datetime, str, str]], int, int]:
+    """Carica data/macro_blackout_YYYY.json. Ritorna (events, before_sec, after_sec).
+
+    events: list di (ts_utc_datetime, event_type, event_name) ordinata per ts.
+    Se file manca o e' invalido, ritorna lista vuota con default 30min/30min.
+    """
+    base_dir = Path(config.get("_base_dir", "."))
+    # Cerca il file per l'anno corrente, poi fallback generico
+    year = datetime.now(timezone.utc).year
+    candidates = [
+        base_dir / "config" / f"macro_blackout_{year}.json",
+        base_dir / "config" / "macro_blackout.json",
+        # Backward-compat fallback:
+        base_dir / "data" / f"macro_blackout_{year}.json",
+        base_dir / "data" / "macro_blackout.json",
+    ]
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            meta = raw.get("_meta", {})
+            before = int(meta.get("window_minutes_before", 30)) * 60
+            after = int(meta.get("window_minutes_after", 30)) * 60
+            events: list[tuple[datetime, str, str]] = []
+            for ev in raw.get("events", []):
+                try:
+                    ts = ev["ts_utc"]
+                    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    events.append((dt, ev.get("type", ""), ev.get("name", "")))
+                except Exception:
+                    continue
+            events.sort(key=lambda x: x[0])
+            logger.info(f"Loaded macro blackout: {len(events)} events from {p.name} (window -{before}s/+{after}s)")
+            return events, before, after
+        except Exception as e:
+            logger.warning(f"Failed to parse {p}: {e}")
+    logger.info("No macro_blackout file found; macro gate disabled")
+    return [], 30 * 60, 30 * 60
 
 
 # ============================================================
@@ -136,6 +179,9 @@ class SignalEngine:
         self.default_tp_pts: float = float(se_cfg.get("default_tp_pts", 12.0))
         self.max_stale_pct: float = float(se_cfg.get("max_stale_features_pct", 0.30))
 
+        # Macro blackout (BUG-02): blocca trade entro window da NFP/CPI/FOMC
+        self._macro_events, self._macro_before_sec, self._macro_after_sec = _load_macro_blackout(config)
+
         # Anti-whipsaw: {direction: last_trade_monotonic_time}
         self._last_trade_time: dict[str, float] = {}
 
@@ -182,6 +228,17 @@ class SignalEngine:
                 rec.reason = f"Trading not allowed in phase {phase.value}"
                 return self._finalize(rec, t0)
 
+            # Macro event blackout (BUG-02): NFP / CPI / FOMC
+            blackout_hit = self._in_macro_blackout(now)
+            if blackout_hit is not None:
+                ev_name, seconds_to_event = blackout_hit
+                rec.step_reached = 1
+                rec.action_taken = "BLOCKED"
+                rec.reason = f"Macro blackout: {ev_name} (t={seconds_to_event:+.0f}s)"
+                rec.details["macro_event"] = ev_name
+                self.orders_blocked += 1
+                return self._finalize(rec, t0)
+
             active_levels = self.session_mgr.get_active_levels()
             phase_min_conf = self.session_mgr.get_min_confidence()
             rec.step_reached = 1
@@ -193,6 +250,21 @@ class SignalEngine:
                 if prediction is None:
                     rec.step_reached = 3
                     rec.reason = "V3.5 Bridge returned None (no features)"
+                    return self._finalize(rec, t0)
+
+                # Live data staleness hard gate: se i dati GEX/features
+                # hanno piu' di `max_live_data_age_sec` di eta', blocca il
+                # trade (no live = no edge). Default 120s.
+                max_age = float(self.config.get("execution", {}).get(
+                    "max_live_data_age_sec", 120.0
+                ))
+                live_age = float(getattr(self.v35_bridge, "_live_data_age_sec", 9999.0))
+                if live_age > max_age:
+                    rec.step_reached = 3
+                    rec.action_taken = "BLOCKED"
+                    rec.reason = f"Live data stale: age={live_age:.0f}s > {max_age:.0f}s"
+                    rec.details["live_data_age_sec"] = live_age
+                    self.orders_blocked += 1
                     return self._finalize(rec, t0)
 
                 # BUG#16 fix: spot precedenza: Databento > GEX json > 0
@@ -491,6 +563,29 @@ class SignalEngine:
 
         elapsed = time.monotonic() - last_time
         return elapsed < self.cooldown_sec
+
+    # ============================================================
+    # Macro blackout (NFP / CPI / FOMC)
+    # ============================================================
+
+    def _in_macro_blackout(self, now: datetime) -> tuple[str, float] | None:
+        """Se now e' entro la finestra di un evento macro, ritorna (event_name, dt_sec).
+
+        dt_sec: positivo = evento nel futuro, negativo = evento nel passato.
+        Finestra: [ts - before_sec, ts + after_sec].
+        Ritorna None se nessun evento in finestra o eventi non caricati.
+        """
+        if not self._macro_events:
+            return None
+        for ts, _ev_type, ev_name in self._macro_events:
+            delta = (ts - now).total_seconds()
+            # In finestra se: -after_sec <= delta <= before_sec
+            if -self._macro_after_sec <= delta <= self._macro_before_sec:
+                return ev_name, delta
+            # Optimization: events sono ordinati; se delta > before_sec possiamo uscire
+            if delta > self._macro_before_sec:
+                break
+        return None
 
     # ============================================================
     # Telegram alert

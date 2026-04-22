@@ -52,7 +52,10 @@ def check_gexbot_api() -> tuple[bool, str]:
         gex_key = get_secret("GEXBOT_API_KEY", required=True)
         resp = requests.get(
             "https://api.gexbot.com/negotiate",
-            headers={"Authorization": f"Basic {gex_key}"},
+            headers={
+                "Authorization": f"Basic {gex_key}",
+                "Accept-Encoding": "gzip",
+            },
             timeout=10
         )
         if resp.status_code == 200 and "websocket_urls" in resp.json():
