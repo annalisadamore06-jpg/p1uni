@@ -284,8 +284,10 @@ def main() -> None:
     log.info(f"  DB: {DB_PATH}")
     log.info(f"  Endpoints: {len(ENDPOINTS)}")
 
-    conn = duckdb.connect(DB_PATH)
-    ensure_db(conn)
+    # Ensure DB schema once at startup (short-lived connection)
+    _init_conn = duckdb.connect(DB_PATH)
+    ensure_db(_init_conn)
+    _init_conn.close()
 
     session = requests.Session()
     session.headers.update({
@@ -298,15 +300,22 @@ def main() -> None:
         while True:
             iteration += 1
             t0 = time.time()
-            saved = scrape_once(conn, session, args.ticker)
+
+            # Open connection per iteration so readers (nt8_bridge_from_scraper.py)
+            # can acquire the file lock between our writes. DuckDB holds an
+            # exclusive file lock while a writable connection is open; keeping
+            # it open for the whole lifetime starved the bridge reader.
+            conn = duckdb.connect(DB_PATH)
+            try:
+                saved = scrape_once(conn, session, args.ticker)
+                total = conn.execute("SELECT COUNT(*) FROM gex_snapshots").fetchone()[0]
+                for ticker in args.ticker:
+                    export_latest_json(conn, ticker)
+            finally:
+                conn.close()
+
             elapsed = time.time() - t0
-
-            total = conn.execute("SELECT COUNT(*) FROM gex_snapshots").fetchone()[0]
             log.info(f"Iter {iteration}: {saved}/{len(ENDPOINTS) * len(args.ticker)} OK ({elapsed:.1f}s). Total in DB: {total:,}")
-
-            # Export latest snapshot to JSON for V35Bridge (lock-free read)
-            for ticker in args.ticker:
-                export_latest_json(conn, ticker)
 
             if args.one_shot:
                 break
@@ -317,16 +326,22 @@ def main() -> None:
     except KeyboardInterrupt:
         log.info("Interrupted by user")
     finally:
-        # Stats finali
-        stats = conn.execute("""
-            SELECT ticker, package, category, COUNT(*) as cnt,
-                   MIN(ts_server) as first_ts, MAX(ts_server) as last_ts
-            FROM gex_snapshots
-            GROUP BY ticker, package, category
-            ORDER BY ticker, package, category
-        """).fetchdf()
-        log.info(f"\n=== STATS FINALI ===\n{stats.to_string(index=False)}")
-        conn.close()
+        # Stats finali (short-lived connection)
+        try:
+            _stats_conn = duckdb.connect(DB_PATH, read_only=True)
+            try:
+                stats = _stats_conn.execute("""
+                    SELECT ticker, package, category, COUNT(*) as cnt,
+                           MIN(ts_server) as first_ts, MAX(ts_server) as last_ts
+                    FROM gex_snapshots
+                    GROUP BY ticker, package, category
+                    ORDER BY ticker, package, category
+                """).fetchdf()
+                log.info(f"\n=== STATS FINALI ===\n{stats.to_string(index=False)}")
+            finally:
+                _stats_conn.close()
+        except Exception as e:
+            log.warning(f"Final stats unavailable: {e}")
 
 
 if __name__ == "__main__":
