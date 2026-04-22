@@ -259,7 +259,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (!enableP1Filter) return true;
 
-            string mode  = p1Cache["mode"] != null ? p1Cache["mode"].ToString() : "";
+            // CSV header key is "session" (values: NIGHT/MORNING/AFTERNOON); legacy "mode" fallback.
+            string mode  = p1Cache["session"] != null ? p1Cache["session"].ToString()
+                         : (p1Cache["mode"] != null ? p1Cache["mode"].ToString() : "");
             double price = GetCurrentPrice(side);
 
             // NOTTE/MATTINA: usa MR (Midnight Range)
@@ -303,11 +305,23 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private bool CheckGexFilter(string side)
         {
-            double price     = GetCurrentPrice(side);
-            double callWall  = GetDouble(gexCache["call_wall"], 0);
-            double putWall   = GetDouble(gexCache["put_wall"], 0);
-            double zeroGamma = GetDouble(gexCache["zero_gamma"], 0);
-            string regime    = gexCache["gex_regime"] != null ? gexCache["gex_regime"].ToString() : "neutral";
+            double price = GetCurrentPrice(side);
+
+            // GEX levels are nested under "gex_levels" in the real JSON
+            // (e.g. nt8_live_enhanced.json written by scraper_rest_bridge).
+            // Keep root-level fallback for backward-compat.
+            JObject gexLevels = gexCache["gex_levels"] as JObject;
+            double callWall  = gexLevels != null ? GetDouble(gexLevels["call_wall"], 0)  : GetDouble(gexCache["call_wall"], 0);
+            double putWall   = gexLevels != null ? GetDouble(gexLevels["put_wall"], 0)   : GetDouble(gexCache["put_wall"], 0);
+            double zeroGamma = gexLevels != null ? GetDouble(gexLevels["zero_gamma"], 0) : GetDouble(gexCache["zero_gamma"], 0);
+
+            // Real JSON key is "regime" with values POSITIVE_GAMMA / NEGATIVE_GAMMA.
+            // Older format used "gex_regime" lowercase (positive/negative). Handle both.
+            string regimeRaw = gexCache["regime"] != null ? gexCache["regime"].ToString()
+                             : (gexCache["gex_regime"] != null ? gexCache["gex_regime"].ToString() : "neutral");
+            string regime = regimeRaw == "POSITIVE_GAMMA" ? "positive" :
+                            regimeRaw == "NEGATIVE_GAMMA" ? "negative" :
+                            regimeRaw;
 
             if (callWall > 0 && side == "LONG" && price > callWall - 3.0)
             {
@@ -320,19 +334,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return false;
             }
 
-            if (regime == "negative")
-            {
-                double conf = GetDouble(gexCache["ml_confidence"], 0);
-                if (conf < 0.75)
-                {
-                    Print("Negative gamma regime: conf " + conf.ToString("F2") + " < 0.75, segnale scartato");
-                    return false;
-                }
-            }
+            // Negative gamma regime = volatile / trend-following.
+            // The legacy "ml_confidence" field no longer exists in the JSON.
+            // MIN_CONFIDENCE gate in ProcessSignal already enforces 0.60 floor;
+            // here we additionally block shorts-into-support / longs-into-resistance
+            // above by walls, which is the main risk. No extra gate needed.
 
             if (zeroGamma > 0 && Math.Abs(price - zeroGamma) < 5.0)
             {
-                Print("Prezzo vicino ZeroGamma " + zeroGamma.ToString("F2") + ", attesa conferma");
+                Print("Prezzo vicino ZeroGamma " + zeroGamma.ToString("F2") + " (regime=" + regime + "), attesa conferma");
                 return false;
             }
 
@@ -407,8 +417,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (side == "LONG")
             {
-                double target = GetDouble(p1Cache["live_r2_up"], GetDouble(p1Cache["mr2d"], price + 20));
-                double stop   = GetDouble(p1Cache["live_r1_dn"], GetDouble(p1Cache["mr1d"], price - 10));
+                // CSV columns: live_range_up/dn + mr2d/mr2u fallback. (legacy keys live_r1/r2_* accepted for back-compat.)
+                double target = GetDouble(p1Cache["live_range_up"],
+                                GetDouble(p1Cache["live_r2_up"],
+                                GetDouble(p1Cache["mr2u"], price + 20)));
+                double stop   = GetDouble(p1Cache["live_range_dn"],
+                                GetDouble(p1Cache["live_r1_dn"],
+                                GetDouble(p1Cache["mr1d"], price - 10)));
 
                 tp = target > price ? target : price + 15;
                 sl = stop < price   ? stop   : price - 8;
@@ -419,8 +434,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (side == "SHORT")
             {
-                double target = GetDouble(p1Cache["live_r2_dn"], GetDouble(p1Cache["mr2d"], price - 20));
-                double stop   = GetDouble(p1Cache["live_r1_up"], GetDouble(p1Cache["mr1u"], price + 10));
+                double target = GetDouble(p1Cache["live_range_dn"],
+                                GetDouble(p1Cache["live_r2_dn"],
+                                GetDouble(p1Cache["mr2d"], price - 20)));
+                double stop   = GetDouble(p1Cache["live_range_up"],
+                                GetDouble(p1Cache["live_r1_up"],
+                                GetDouble(p1Cache["mr1u"], price + 10)));
 
                 tp = target < price ? target : price - 15;
                 sl = stop > price   ? stop   : price + 8;

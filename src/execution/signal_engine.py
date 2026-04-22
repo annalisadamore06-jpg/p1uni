@@ -418,6 +418,22 @@ class SignalEngine:
             rec.step_reached = 5
 
             # === STEP 6: EXECUTE ORDER ===
+            # Bridge health gate: block send if TCP heartbeat is stale.
+            # Reason: zombie TCP socket (NT8 hung / network glitch) passes
+            # is_connected() but fails is_healthy() when no heartbeat ACK
+            # landed in the last 2*interval. In paper mode this is always True.
+            if hasattr(self.bridge, "is_healthy") and not self.bridge.is_healthy():
+                hb_status = (
+                    self.bridge.get_heartbeat_status()
+                    if hasattr(self.bridge, "get_heartbeat_status") else {}
+                )
+                rec.step_reached = 5
+                rec.action_taken = "BLOCKED"
+                rec.reason = f"Bridge unhealthy (heartbeat stale): {hb_status}"
+                rec.details["heartbeat"] = hb_status
+                self.orders_blocked += 1
+                return self._finalize(rec, t0)
+
             # Passa raw_probability (avg_proba 0-1) al bridge per NT8 confidence check
             raw_prob = prediction.get("probabilities", {}).get("raw", 0.0)
             order_result = self.bridge.send_order(

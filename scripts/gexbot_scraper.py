@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -46,9 +45,6 @@ from src.core.secrets import get_secret
 
 BASE_URL = "https://api.gexbot.com"
 DB_PATH = str(BASE_DIR / "data" / "gexbot_snapshots.duckdb")
-
-# BUG-07 fix: NT8 C# indicators leggono da questo path hardcoded
-NT8_MIRROR_PATH = Path(r"C:\Users\annal\Desktop\WEBSOCKET DATABASE\nt8_live_enhanced.json")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -268,14 +264,6 @@ def export_latest_json(conn: duckdb.DuckDBPyConnection, ticker: str) -> None:
         tmp_path.replace(out_path)
 
         log.debug(f"Exported latest snapshot ({len(export['snapshots'])} categories) to {out_path.name}")
-
-        # BUG-07 fix: mirror verso path letto da NT8 C# indicators
-        # (MLAutoStrategy_P1.cs e MLSignalIndicator.cs leggono da nt8_live_enhanced.json)
-        try:
-            NT8_MIRROR_PATH.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(out_path, NT8_MIRROR_PATH)
-        except Exception as mirror_err:
-            log.warning(f"NT8 mirror copy failed ({NT8_MIRROR_PATH}): {mirror_err}")
 
     except Exception as e:
         log.warning(f"export_latest_json failed: {e}")
