@@ -31,7 +31,10 @@ log = logging.getLogger("consolidate")
 ML_GOLD_PATH = r"C:\Users\annal\Desktop\ML DATABASE\ml_gold.duckdb"
 P1UNI_HISTORY_PATH = str(Path(__file__).parent.parent / "data" / "p1uni_history.duckdb")
 GEXBOT_SNAPSHOTS_PATH = str(Path(__file__).parent.parent / "data" / "gexbot_snapshots.duckdb")
-GEXBOT_WS_PATH = str(Path(__file__).parent.parent / "data" / "gexbot_ws.duckdb")
+GEXBOT_WS_PATH = os.environ.get(
+    "GEXBOT_WS_DB",
+    r"C:\Users\annal\Desktop\WEBSOCKET DATABASE\gexbot_ws.duckdb",
+)
 P1_LITE_DATA_DIR = r"C:\Users\annal\Desktop\p1-lite\data"
 
 
