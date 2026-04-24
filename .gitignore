@@ -43,3 +43,9 @@ Thumbs.db
 # Logs
 logs/
 *.log
+
+# Auto-generated reports (daily, runtime state)
+MORNING_READINESS_REPORT.md
+
+# Research outputs (data/results, not code)
+research/results/

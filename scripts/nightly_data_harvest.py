@@ -54,9 +54,9 @@ SYMBOLS = {
     "GLD":  {"dataset": "DBEQ.BASIC", "symbol": "GLD",     "stype": "raw_symbol"},
     "TLT":  {"dataset": "DBEQ.BASIC", "symbol": "TLT",     "stype": "raw_symbol"},
     "UVXY": {"dataset": "DBEQ.BASIC", "symbol": "UVXY",    "stype": "raw_symbol"},
-    # VIX index: Databento OPRA covers options but not the spot index. If the
-    # user has an index feed subscription, swap dataset to "XCBO" and re-enable.
-    "VIX":  {"dataset": "XCBO",       "symbol": "VIX",     "stype": "raw_symbol"},
+    # VIX: CBOE spot index — not available on Databento standard feeds.
+    # "XCBO" dataset is invalid/requires a separate index subscription.
+    # VIX is excluded from harvest; its GEX data comes from GexBot WS instead.
 }
 
 # All tickers the system considers "universe". Keep in sync with
