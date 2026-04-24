@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """P1UNI Unified Watchdog - single supervisor for the whole trading stack.
 
-Manages 8 services:
+Manages 8 services + scheduled jobs:
     1. TWS           (IBC autologin on port 7496)
     2. NinjaTrader   (manual launch, presence check only)
     3. p1uni_main    (signal engine + execution)
@@ -11,16 +11,29 @@ Manages 8 services:
     7. nt8_bridge_from_scraper (WEBSOCKET DB -> NT8 JSON)
     8. p1lite_dashboard (p1-lite Streamlit/Dash UI)
 
+Scheduled jobs (one-shot per day, tracked separately from services):
+    - nightly_harvest (Databento bulk download, 23:05 Zurich, 30min timeout)
+
 Per service:
     - psutil-based identification (name + cmdline substring + optional cwd)
+    - pre-launch dedup so we never spawn a duplicate
+    - post-launch verification: PID must be alive + non-zombie after a settle
+      window, otherwise we record the failure and back off via cooldown
     - auto-launch if DOWN (respecting dependencies + operating hours + cooldown)
     - singleton enforcement (keep oldest PID, terminate newer duplicates)
     - optional health file freshness check
     - optional TCP port check (TWS)
 
+Per job:
+    - daily trigger window in Zurich time
+    - idempotent (state["jobs"][name]["last_run_date"] = today => skip)
+    - singleton-by-PID (won't spawn a second one if previous is still running)
+    - hard timeout: process is killed if it exceeds the configured limit
+
 State:
-    - P1UNI/data/watchdog_state.json    (last_restart per service, last audit)
+    - P1UNI/data/watchdog_state.json    (last_restart per service, jobs, audit)
     - P1UNI/logs/watchdog.log           (rotating not needed, we append)
+    - P1UNI/logs/<job_name>_<date>.log  (per-job stdout/stderr capture)
 
 Usage:
     python watchdog.py                  # one audit + fix, then exit
@@ -41,9 +54,9 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, time as dtime
+from datetime import datetime, date, time as dtime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 try:
@@ -82,6 +95,8 @@ OP_MARKET_DAYS = "weekday"      # any time Mon-Fri
 
 DEFAULT_COOLDOWN = 300          # 5min between restarts of the same service
 LAUNCH_SETTLE = 2               # seconds to wait after launch before next service
+LAUNCH_VERIFY_DELAY = 3         # seconds before checking the freshly-spawned PID is alive
+LAUNCH_VERIFY_FAIL_COOLDOWN = 120  # if verify fails, mark as restarted so we back off
 
 
 # ------------------------------------------------------------------
@@ -368,7 +383,22 @@ def kill_pid(pid: int) -> bool:
         return False
 
 
+def pid_alive(pid: int) -> bool:
+    """Returns True iff pid corresponds to a running, non-terminated process."""
+    if pid is None or pid <= 0:
+        return False
+    try:
+        p = psutil.Process(pid)
+        if not p.is_running():
+            return False
+        # On Windows STATUS_ZOMBIE is rare but STATUS_DEAD/STOPPED can occur
+        return p.status() not in (psutil.STATUS_DEAD, psutil.STATUS_ZOMBIE, psutil.STATUS_STOPPED)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+
+
 def launch_service(svc: Service) -> Optional[int]:
+    """Spawn the service and return the immediate Popen PID (may be a wrapper)."""
     log.info("LAUNCH %s cwd=%s cmd=%s", svc.name, svc.launch_cwd, svc.launch_cmd)
     try:
         creation = 0
@@ -389,17 +419,41 @@ def launch_service(svc: Service) -> Optional[int]:
         return None
 
 
+def verify_service_alive(svc: Service) -> Tuple[bool, List[int]]:
+    """Re-snapshot processes and confirm svc is now alive via the same match logic.
+
+    Used after launch to catch zombies / immediate crashes. Works for all launch
+    styles (Python direct, cmd /c wrappers, .lnk shortcuts) because we look at the
+    final process tree, not the Popen handle.
+    """
+    procs = snapshot_procs()
+    hits = match_service(svc, procs)
+    pids = sorted(p["pid"] for p in hits)
+    alive = bool(hits)
+    if alive and svc.port_check is not None:
+        alive = port_listening(svc.port_check)
+    return alive, pids
+
+
 # ------------------------------------------------------------------
 # State file
 # ------------------------------------------------------------------
+def _empty_state() -> dict:
+    return {"last_restart": {}, "jobs": {}, "last_cycle": None}
+
+
 def load_state() -> dict:
     if not STATE_PATH.exists():
-        return {"last_restart": {}, "last_cycle": None}
+        return _empty_state()
     try:
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        s = json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except Exception as e:
         log.warning("state file corrupted (%s), starting fresh", e)
-        return {"last_restart": {}, "last_cycle": None}
+        return _empty_state()
+    s.setdefault("last_restart", {})
+    s.setdefault("jobs", {})
+    s.setdefault("last_cycle", None)
+    return s
 
 
 def save_state(state: dict) -> None:
@@ -410,6 +464,128 @@ def save_state(state: dict) -> None:
 
 
 # ------------------------------------------------------------------
+# Scheduled jobs (one-shot per day, separate from long-running services)
+# ------------------------------------------------------------------
+@dataclass
+class Job:
+    name: str
+    launch_cmd: List[str]
+    launch_cwd: str
+    trigger_hour: int                  # Zurich hour
+    trigger_minute: int                # Zurich minute
+    timeout_sec: int                   # hard kill after this many seconds
+    weekday_only: bool = False         # if True, never run on Sat/Sun
+    log_dir: str = str(P1UNI_DIR / "logs")
+
+
+JOBS: List[Job] = [
+    Job(
+        name="nightly_harvest",
+        launch_cmd=[PY, r"scripts\nightly_data_harvest.py", "--days", "2"],
+        launch_cwd=str(P1UNI_DIR),
+        trigger_hour=23,
+        trigger_minute=5,
+        timeout_sec=1800,              # 30 minutes hard cap
+        weekday_only=False,            # also run on Sat morning to catch Fri data
+    ),
+]
+
+
+def _today_zurich() -> str:
+    return datetime.now(ZURICH).date().isoformat()
+
+
+def _job_state(state: dict, name: str) -> dict:
+    return state.setdefault("jobs", {}).setdefault(name, {})
+
+
+def _spawn_job(job: Job) -> Optional[int]:
+    """Spawn a job as a tracked subprocess with stdout/stderr captured to a log file."""
+    log_path = Path(job.log_dir) / f"{job.name}_{_today_zurich()}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log.info("JOB START %s -> %s", job.name, log_path)
+    try:
+        # Open log in append mode so re-runs in the same day extend the file
+        fh = open(log_path, "ab", buffering=0)
+        creation = 0
+        if sys.platform == "win32":
+            creation = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        p = subprocess.Popen(
+            job.launch_cmd,
+            cwd=job.launch_cwd,
+            stdout=fh,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            creationflags=creation,
+            close_fds=True,
+        )
+        return p.pid
+    except Exception as e:
+        log.error("JOB %s spawn failed: %s", job.name, e)
+        return None
+
+
+def run_jobs(state: dict) -> None:
+    """Each cycle: poll any in-flight job (kill on timeout), then maybe trigger
+    today's run if the scheduled window has been reached and we haven't run yet."""
+    now = datetime.now(ZURICH)
+    today = now.date().isoformat()
+
+    for job in JOBS:
+        js = _job_state(state, job.name)
+
+        # 1) Poll an in-flight run for completion or timeout
+        running_pid = js.get("pid")
+        if running_pid:
+            if pid_alive(running_pid):
+                started = js.get("started_at_ts", time.time())
+                elapsed = time.time() - started
+                if elapsed > job.timeout_sec:
+                    log.error("JOB %s TIMEOUT after %.0fs (limit %ds) — killing pid=%d",
+                              job.name, elapsed, job.timeout_sec, running_pid)
+                    kill_pid(running_pid)
+                    js["pid"] = None
+                    js["last_status"] = "timeout"
+                    js["last_run_date"] = today        # do not retry today
+                    js["finished_at"] = now.isoformat(timespec="seconds")
+                else:
+                    # still running — nothing to do, will be re-checked next cycle
+                    log.info("JOB %s still running pid=%d elapsed=%.0fs",
+                             job.name, running_pid, elapsed)
+                    continue
+            else:
+                log.info("JOB %s finished pid=%d", job.name, running_pid)
+                js["pid"] = None
+                js["last_status"] = "finished"
+                js["last_run_date"] = today
+                js["finished_at"] = now.isoformat(timespec="seconds")
+
+        # 2) Trigger if today's window reached and we haven't run yet
+        if js.get("last_run_date") == today:
+            continue
+        if job.weekday_only and now.weekday() >= 5:
+            continue
+        scheduled = dtime(job.trigger_hour, job.trigger_minute)
+        if now.time() < scheduled:
+            continue
+        # Avoid spawning if a previous PID is somehow still around (defense in depth)
+        if running_pid and pid_alive(running_pid):
+            log.warning("JOB %s skip-trigger: previous pid=%d still alive",
+                        job.name, running_pid)
+            continue
+
+        pid = _spawn_job(job)
+        if pid is None:
+            js["last_status"] = "spawn_failed"
+            js["last_run_date"] = today                # don't hammer-retry
+        else:
+            js["pid"] = pid
+            js["started_at"] = now.isoformat(timespec="seconds")
+            js["started_at_ts"] = time.time()
+            js["last_status"] = "running"
+
+
+# ------------------------------------------------------------------
 # Supervisor
 # ------------------------------------------------------------------
 def supervise(state: dict, fix: bool) -> dict:
@@ -417,7 +593,7 @@ def supervise(state: dict, fix: bool) -> dict:
     statuses = {svc.name: inspect(svc, procs) for svc in SERVICES}
     now_ts = time.time()
 
-    # Pass 1: dedupe singletons
+    # Pass 1: dedupe singletons (kill before launch so we never spawn into duplicates)
     if fix:
         for svc in SERVICES:
             st = statuses[svc.name]
@@ -425,14 +601,15 @@ def supervise(state: dict, fix: bool) -> dict:
                 keep = oldest_pid(st.pids)
                 killed = []
                 for pid in st.pids:
-                    if pid != keep:
-                        if kill_pid(pid):
-                            killed.append(pid)
+                    if pid != keep and kill_pid(pid):
+                        killed.append(pid)
                 log.warning("DEDUP %s keep=%d killed=%s", svc.name, keep, killed)
                 st.action = f"dedup keep={keep}"
                 st.pids = [keep]
+                st.duplicate = False
 
     # Pass 2: launch missing honoring deps + hours + cooldown
+    just_launched: List[str] = []
     if fix:
         launched = set()
         for _ in range(3):                          # up to 3 passes for deps
@@ -458,7 +635,6 @@ def supervise(state: dict, fix: bool) -> dict:
                     launched.add(svc.name)
                     continue
 
-                # deps
                 deps_ok = all(
                     statuses[d].alive and not statuses[d].stale
                     for d in svc.depends_on
@@ -466,7 +642,6 @@ def supervise(state: dict, fix: bool) -> dict:
                 if not deps_ok:
                     continue
 
-                # cooldown
                 last = state["last_restart"].get(svc.name, 0.0)
                 since = now_ts - last
                 if since < svc.cooldown_sec:
@@ -475,15 +650,64 @@ def supervise(state: dict, fix: bool) -> dict:
                     launched.add(svc.name)
                     continue
 
+                # PRE-LAUNCH safety re-check: confirm singleton is truly empty.
+                # Guards against the race where a process spawned between snapshot
+                # and now (e.g. by Task Scheduler) and we'd otherwise create a duplicate.
+                if svc.singleton:
+                    fresh_hits = match_service(svc, snapshot_procs())
+                    if fresh_hits:
+                        log.info("SKIP-LAUNCH %s already alive (race-detected pids=%s)",
+                                 svc.name, [p["pid"] for p in fresh_hits])
+                        st.alive = True
+                        st.pids = sorted(p["pid"] for p in fresh_hits)
+                        st.action = "race-detected, skipped launch"
+                        launched.add(svc.name)
+                        continue
+
                 pid = launch_service(svc)
-                if pid is not None:
-                    state["last_restart"][svc.name] = now_ts
-                    st.action = f"launched pid={pid}"
+                if pid is None:
+                    st.action = "launch_failed"
+                    state["last_restart"][svc.name] = now_ts  # back off
                     launched.add(svc.name)
-                    progress = True
-                    time.sleep(LAUNCH_SETTLE)
+                    continue
+
+                state["last_restart"][svc.name] = now_ts
+                st.action = f"launched pid={pid}"
+                just_launched.append(svc.name)
+                launched.add(svc.name)
+                progress = True
+                time.sleep(LAUNCH_SETTLE)
             if not progress:
                 break
+
+    # Pass 3: post-launch verification — re-snapshot, confirm each launched service
+    # is actually visible in the process tree (catches zombies, immediate crashes,
+    # and wrapper-launched programs that did not start the real child).
+    if fix and just_launched:
+        time.sleep(LAUNCH_VERIFY_DELAY)
+        for name in just_launched:
+            svc = BY_NAME[name]
+            alive, pids = verify_service_alive(svc)
+            st = statuses[name]
+            if alive:
+                st.alive = True
+                st.pids = pids
+                st.action = (st.action or "") + f" -> verified alive pids={pids}"
+                log.info("VERIFY %s OK pids=%s", name, pids)
+            else:
+                st.alive = False
+                st.action = (st.action or "") + " -> verify FAILED (zombie or crashed)"
+                log.error("VERIFY %s FAILED — process not visible after launch (cooldown applied)",
+                          name)
+                # last_restart already set above, so the configured cooldown
+                # prevents a tight relaunch loop.
+
+    # Run scheduled jobs (idempotent, singleton, timeout-bounded)
+    if fix:
+        try:
+            run_jobs(state)
+        except Exception as e:
+            log.exception("run_jobs failed: %s", e)
 
     state["last_cycle"] = datetime.now(ZURICH).isoformat(timespec="seconds")
     state["statuses"] = {n: asdict(s) for n, s in statuses.items()}
@@ -494,7 +718,7 @@ def supervise(state: dict, fix: bool) -> dict:
 # ------------------------------------------------------------------
 # Reporting
 # ------------------------------------------------------------------
-def pretty(statuses: dict) -> str:
+def pretty(statuses: dict, state: Optional[dict] = None) -> str:
     now = datetime.now(ZURICH).strftime("%Y-%m-%d %H:%M:%S %Z")
     out = [f"=== P1UNI WATCHDOG @ {now} ==="]
     groups: dict = {}
@@ -527,6 +751,17 @@ def pretty(statuses: dict) -> str:
             if st.action:
                 extras.append(f"act={st.action}")
             out.append(f"  [{icon}] {st.name:28s} {' '.join(extras)}")
+
+    if state and state.get("jobs"):
+        out.append("[JOBS]")
+        for job in JOBS:
+            js = state["jobs"].get(job.name, {})
+            status = js.get("last_status", "never-run")
+            last_date = js.get("last_run_date", "—")
+            pid = js.get("pid") or "—"
+            out.append(f"  [{status:10s}] {job.name:28s} last_run={last_date} pid={pid} "
+                       f"trigger={job.trigger_hour:02d}:{job.trigger_minute:02d} "
+                       f"timeout={job.timeout_sec}s")
     return "\n".join(out)
 
 
@@ -552,7 +787,7 @@ def main() -> int:
     def cycle():
         try:
             statuses = supervise(state, fix=fix)
-            log.info("\n" + pretty(statuses))
+            log.info("\n" + pretty(statuses, state))
         except Exception as e:
             log.exception("cycle failed: %s", e)
 
