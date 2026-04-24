@@ -21,7 +21,7 @@ databento:
   buffer_size: 200000
 
 gexbot:
-  api_key: "${GEXBOT_API_KEY}"  # gexbot_custom_shE33FA5ILrtPCgETlgbKW3Hy7LeBo1xWgRz1UZlsWE
+  api_key: "${GEXBOT_API_KEY}"  # set via env var or settings.yaml (never commit real keys)
   ws_url: "wss://PLACEHOLDER_GEXBOT_ENDPOINT"  # URL negoziato dinamicamente via /negotiate
   reconnect_max_sec: 60
   tickers: ["ES_SPX"]
