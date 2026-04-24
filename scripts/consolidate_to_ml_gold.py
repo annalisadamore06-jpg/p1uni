@@ -101,12 +101,16 @@ def _get_watermark(conn: duckdb.DuckDBPyConnection, table: str, ts_col: str) -> 
 
 
 def _attach_readonly(conn: duckdb.DuckDBPyConnection, path: str, alias: str) -> bool:
-    """ATTACH another DuckDB file read-only. Returns False if missing."""
+    """ATTACH another DuckDB file read-only. Returns False if missing or locked."""
     if not os.path.exists(path):
         log.warning(f"source DB missing: {path}")
         return False
-    conn.execute(f"ATTACH '{path}' AS {alias} (READ_ONLY)")
-    return True
+    try:
+        conn.execute(f"ATTACH '{path}' AS {alias} (READ_ONLY)")
+        return True
+    except duckdb.IOException as e:
+        log.warning(f"source DB locked (another process holds write lock) — skipping: {path} [{e}]")
+        return False
 
 
 def _detach(conn: duckdb.DuckDBPyConnection, alias: str) -> None:
