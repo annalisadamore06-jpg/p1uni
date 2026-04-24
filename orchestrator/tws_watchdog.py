@@ -1,4 +1,5 @@
-"""TWS watchdog — auto-restart TWS via IBC when port 7496 stops responding.
+# -*- coding: utf-8 -*-
+"""TWS watchdog - auto-restart TWS via IBC when port 7496 stops responding.
 
 Design
 ------
@@ -12,9 +13,9 @@ Design
 Standalone usage (foreground, for testing):
     python orchestrator/tws_watchdog.py
 
-As a background service, register with Task Scheduler:
-    schtasks /Create /SC ONLOGON /TN P1UNI_TWSWatchdog \
-        /TR "pythonw.exe C:\Users\annal\Desktop\P1UNI\orchestrator\tws_watchdog.py" \
+As a background service, register with Task Scheduler (run from elevated):
+    schtasks /Create /SC ONLOGON /TN P1UNI_TWSWatchdog ^
+        /TR "pythonw.exe C:\\Users\\annal\\Desktop\\P1UNI\\orchestrator\\tws_watchdog.py" ^
         /RL LIMITED /F
 """
 from __future__ import annotations
@@ -25,7 +26,6 @@ import socket
 import subprocess
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 # ------------------------------------------------------------------
@@ -34,8 +34,8 @@ from pathlib import Path
 TWS_HOST = os.environ.get("TWS_HOST", "127.0.0.1")
 TWS_PORT = int(os.environ.get("TWS_PORT", "7496"))
 CHECK_INTERVAL_SEC = int(os.environ.get("TWS_CHECK_INTERVAL", "30"))
-FAIL_THRESHOLD = int(os.environ.get("TWS_FAIL_THRESHOLD", "3"))        # 3 * 30s = 90s down before restart
-RESTART_COOLDOWN_SEC = int(os.environ.get("TWS_RESTART_COOLDOWN", "300"))  # 5 min between restarts
+FAIL_THRESHOLD = int(os.environ.get("TWS_FAIL_THRESHOLD", "3"))
+RESTART_COOLDOWN_SEC = int(os.environ.get("TWS_RESTART_COOLDOWN", "300"))
 IBC_START_BAT = os.environ.get("IBC_START_BAT", r"C:\IBC\StartTWS.bat")
 LOG_PATH = os.environ.get(
     "TWS_WATCHDOG_LOG",
@@ -77,7 +77,6 @@ def launch_tws() -> subprocess.Popen:
         raise FileNotFoundError(IBC_START_BAT)
 
     log.info("Launching TWS via IBC: %s", IBC_START_BAT)
-    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so the child survives us.
     creationflags = 0
     if sys.platform == "win32":
         creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -100,8 +99,10 @@ def launch_tws() -> subprocess.Popen:
 def main() -> int:
     log.info("=" * 60)
     log.info("TWS watchdog starting")
-    log.info("  probe=%s:%d interval=%ds fail_threshold=%d cooldown=%ds",
-             TWS_HOST, TWS_PORT, CHECK_INTERVAL_SEC, FAIL_THRESHOLD, RESTART_COOLDOWN_SEC)
+    log.info(
+        "  probe=%s:%d interval=%ds fail_threshold=%d cooldown=%ds",
+        TWS_HOST, TWS_PORT, CHECK_INTERVAL_SEC, FAIL_THRESHOLD, RESTART_COOLDOWN_SEC,
+    )
     log.info("  IBC batch: %s", IBC_START_BAT)
     log.info("=" * 60)
 
@@ -123,15 +124,18 @@ def main() -> int:
             if consecutive_fails >= FAIL_THRESHOLD:
                 since_last = now - last_restart_ts
                 if since_last < RESTART_COOLDOWN_SEC:
-                    log.info("cooldown active (%.0fs since last restart, need %ds) — waiting",
-                             since_last, RESTART_COOLDOWN_SEC)
+                    log.info(
+                        "cooldown active (%.0fs since last restart, need %ds) - waiting",
+                        since_last, RESTART_COOLDOWN_SEC,
+                    )
                 else:
                     try:
                         launch_tws()
                         last_restart_ts = now
-                        log.info("Restart issued. Waiting %ds before next probe cycle.",
-                                 RESTART_COOLDOWN_SEC)
-                        # Give IBC time to start + user time to complete 2FA.
+                        log.info(
+                            "Restart issued. Waiting %ds before next probe cycle.",
+                            RESTART_COOLDOWN_SEC,
+                        )
                         time.sleep(RESTART_COOLDOWN_SEC)
                         consecutive_fails = 0
                         continue
