@@ -27,13 +27,41 @@ logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s", date
 log = logging.getLogger("harvest")
 
 API_KEY = get_secret("DATABENTO_API_KEY", required=True)
-DATASET = "GLBX.MDP3"
-DB_PATH = str(Path(__file__).parent.parent / "data" / "p1uni_history.duckdb")
 
+# Default dataset for legacy callers (ES/NQ futures).
+DATASET = "GLBX.MDP3"
+
+# Centralized gold DB (cross-source consolidation target). Historical trades
+# keep landing in p1uni_history.duckdb; a separate consolidation step copies
+# them into ml_gold.duckdb (see consolidate_to_ml_gold()).
+DB_PATH = str(Path(__file__).parent.parent / "data" / "p1uni_history.duckdb")
+ML_GOLD_PATH = r"C:\Users\annal\Desktop\ML DATABASE\ml_gold.duckdb"
+
+# Per-ticker Databento dataset + native symbol.
+# - GLBX.MDP3 : CME futures continuous front-month (ES, NQ)
+# - XNAS.ITCH : Nasdaq equities (SPY, QQQ, IWM, GLD, TLT, UVXY via Nasdaq)
+# - OPRA.PILLAR : options (not used here)
+# - XCHI.PITCH / XNYS.PILLAR : NYSE-listed (GLD, TLT are NYSE Arca — use
+#   DBEQ.BASIC consolidated feed for cross-venue equities)
+# - VIX is the CBOE index; Databento sells it under OPRA for options, but the
+#   underlying VIX level comes from XCBO/index feeds. Flagged as optional.
 SYMBOLS = {
-    "ES": "ES.c.0",
-    "NQ": "NQ.c.0",
+    "ES":   {"dataset": "GLBX.MDP3",  "symbol": "ES.c.0",  "stype": "continuous"},
+    "NQ":   {"dataset": "GLBX.MDP3",  "symbol": "NQ.c.0",  "stype": "continuous"},
+    "SPY":  {"dataset": "DBEQ.BASIC", "symbol": "SPY",     "stype": "raw_symbol"},
+    "QQQ":  {"dataset": "DBEQ.BASIC", "symbol": "QQQ",     "stype": "raw_symbol"},
+    "IWM":  {"dataset": "DBEQ.BASIC", "symbol": "IWM",     "stype": "raw_symbol"},
+    "GLD":  {"dataset": "DBEQ.BASIC", "symbol": "GLD",     "stype": "raw_symbol"},
+    "TLT":  {"dataset": "DBEQ.BASIC", "symbol": "TLT",     "stype": "raw_symbol"},
+    "UVXY": {"dataset": "DBEQ.BASIC", "symbol": "UVXY",    "stype": "raw_symbol"},
+    # VIX index: Databento OPRA covers options but not the spot index. If the
+    # user has an index feed subscription, swap dataset to "XCBO" and re-enable.
+    "VIX":  {"dataset": "XCBO",       "symbol": "VIX",     "stype": "raw_symbol"},
 }
+
+# All tickers the system considers "universe". Keep in sync with
+# config/settings.yaml -> tickers.valid.
+ALL_TICKERS = ["ES", "NQ", "SPY", "QQQ", "VIX", "IWM", "GLD", "TLT", "UVXY"]
 
 
 def create_tables(conn: duckdb.DuckDBPyConnection) -> None:
@@ -56,9 +84,19 @@ def create_tables(conn: duckdb.DuckDBPyConnection) -> None:
 
 
 def harvest_day(conn: duckdb.DuckDBPyConnection, symbol: str, ticker: str,
-                date: datetime, schema: str = "trades") -> int:
-    """Scarica un giorno di dati per un simbolo."""
+                date: datetime, schema: str = "trades",
+                dataset: str | None = None, stype: str | None = None) -> int:
+    """Scarica un giorno di dati per un simbolo.
+
+    dataset/stype optional: if None, fall back to SYMBOLS[ticker] or module
+    defaults (back-compat for callers that don't yet pass per-ticker config).
+    """
     import databento as db
+
+    if dataset is None or stype is None:
+        cfg = SYMBOLS.get(ticker, {})
+        dataset = dataset or cfg.get("dataset", DATASET)
+        stype = stype or cfg.get("stype") or ("continuous" if ".c." in symbol else "raw_symbol")
 
     start = date.strftime("%Y-%m-%dT00:00:00")
     end = (date + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
@@ -76,12 +114,12 @@ def harvest_day(conn: duckdb.DuckDBPyConnection, symbol: str, ticker: str,
     try:
         client = db.Historical(key=API_KEY)
         data = client.timeseries.get_range(
-            dataset=DATASET,
+            dataset=dataset,
             symbols=[symbol],
             schema=schema,
             start=start,
             end=end,
-            stype_in="continuous" if ".c." in symbol else "raw_symbol",
+            stype_in=stype,
         )
 
         df = data.to_df()
@@ -256,7 +294,10 @@ def replay_quarantine(live_db_path: str, quarantine_base: Path, date_str: str | 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=7, help="Giorni da scaricare")
-    parser.add_argument("--symbols", nargs="+", default=["ES"], help="Ticker da scaricare")
+    parser.add_argument("--symbols", nargs="+", default=ALL_TICKERS,
+                        help="Ticker da scaricare (default: tutti 9)")
+    parser.add_argument("--consolidate", action="store_true",
+                        help="Dopo l'harvest, consolida tutti i DB frammentati in ml_gold.duckdb")
     parser.add_argument("--replay-quarantine", action="store_true",
                         help="Re-inserisce i file in quarantine nel DB live invece di scaricare nuovi dati")
     parser.add_argument("--replay-date", type=str, default=None,
@@ -309,15 +350,23 @@ def main():
     end_date = datetime.now(timezone.utc)
 
     for ticker in args.symbols:
-        symbol = SYMBOLS.get(ticker, f"{ticker}.FUT.CME")
-        log.info(f"\n--- {ticker} ({symbol}) ---")
+        cfg = SYMBOLS.get(ticker)
+        if cfg is None:
+            log.warning(f"  {ticker}: not in SYMBOLS map; skip (add to SYMBOLS to enable)")
+            continue
+        symbol = cfg["symbol"]
+        dataset = cfg["dataset"]
+        stype = cfg["stype"]
+        log.info(f"\n--- {ticker} ({symbol} / {dataset}) ---")
 
         for day_offset in range(args.days):
             date = end_date - timedelta(days=day_offset + 1)
-            # Skip weekends
+            # Skip weekends (note: some datasets have Sat/Sun OPRA sessions;
+            # adjust if needed per-dataset, but trades/MBP-1 only trade M-F).
             if date.weekday() >= 5:
                 continue
-            n = harvest_day(conn, symbol, ticker, date)
+            n = harvest_day(conn, symbol, ticker, date,
+                            dataset=dataset, stype=stype)
             total_records += n
             time.sleep(0.5)  # rate limit
 
@@ -325,6 +374,19 @@ def main():
     conn.close()
 
     log.info(f"\n=== HARVEST COMPLETE: {total_records:,} records ===")
+
+    if args.consolidate:
+        log.info("\n=== CONSOLIDATING INTO ml_gold.duckdb ===")
+        try:
+            from consolidate_to_ml_gold import run_consolidation
+            run_consolidation(
+                p1uni_history_path=DB_PATH,
+                ml_gold_path=ML_GOLD_PATH,
+            )
+        except ImportError:
+            log.error("consolidate_to_ml_gold module not found; skipping consolidation")
+        except Exception as e:
+            log.error(f"Consolidation failed: {e}")
 
 
 if __name__ == "__main__":
