@@ -266,15 +266,18 @@ def consolidate_p1lite_snapshots(conn: duckdb.DuckDBPyConnection,
                             ts_dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
                         except ValueError:
                             continue
-                    if wm and ts_dt <= wm:
+                    if wm and ts_dt.replace(tzinfo=None) <= wm:
                         continue
 
                     def _f(k):
                         v = r.get(k, "")
                         return float(v) if v not in ("", None) else None
 
+                    raw_date = r.get("date", "").strip()
+                    if len(raw_date) == 8 and raw_date.isdigit():
+                        raw_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
                     rows.append((
-                        ts_dt, r.get("slot"), r.get("date"),
+                        ts_dt.replace(tzinfo=None), r.get("slot"), raw_date or None,
                         r.get("base_label"), _f("base_value"),
                         _f("spx_open"), _f("spread"),
                         _f("iv_daily"), _f("iv_straddle"),
@@ -321,7 +324,7 @@ def consolidate_p1lite_live(conn: duckdb.DuckDBPyConnection,
     except ValueError:
         return 0
 
-    if wm and ts_dt <= wm:
+    if wm and ts_dt.replace(tzinfo=None) <= wm:
         return 0  # no new data
 
     def _f(k):
