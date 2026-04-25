@@ -198,7 +198,7 @@ SERVICES: List[Service] = [
         depends_on=["TWS"],
         health_file=str(Path(P1LITE) / "data" / "state.json"),
         max_age_sec=180,
-        operating_hours=OP_ALWAYS,
+        operating_hours=OP_MARKET_DAYS,  # Sat/Sun: market closed, no data expected
     ),
     Service(
         name="nt8_bridge_from_scraper",
@@ -337,6 +337,11 @@ def inspect(svc: Service, procs: List[dict]) -> Status:
         if not st.port_ok:
             st.alive = False
             st.reason = f"port {svc.port_check} not listening"
+        elif not st.alive:
+            # Port is listening even though process match failed (e.g. TWS started
+            # manually instead of via IBC). Treat port as primary liveness signal.
+            st.alive = True
+            st.reason = f"port {svc.port_check} listening (process not matched)"
 
     if st.alive and svc.health_file and svc.max_age_sec:
         age = file_age(svc.health_file)
