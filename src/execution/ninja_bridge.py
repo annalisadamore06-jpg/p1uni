@@ -38,6 +38,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger("p1uni.execution.ninja_bridge")
@@ -146,6 +147,14 @@ class NinjaTraderBridge:
         self._last_heartbeat_fail_ts: float = 0.0
         self._heartbeat_failures_total: int = 0
 
+        # Health file for watchdog monitoring (updated on each heartbeat / connect event)
+        _health_path = exec_cfg.get(
+            "bridge_health_file",
+            str(Path(__file__).resolve().parent.parent.parent / "data" / "ninja_bridge_health.json")
+        )
+        self._health_file = Path(_health_path)
+        self._health_file.parent.mkdir(parents=True, exist_ok=True)
+
         mode_str = "PAPER" if self.paper_mode else "LIVE"
         logger.info(f"NinjaTraderBridge initialized in {mode_str} mode")
 
@@ -160,6 +169,7 @@ class NinjaTraderBridge:
         if self.paper_mode:
             logger.info("[PAPER] Bridge started in simulation mode")
             self._connected = True
+            self._write_health()
             return
 
         # LIVE: TCP server che attende NT8
@@ -170,6 +180,7 @@ class NinjaTraderBridge:
             self._server_sock.listen(1)
             self._server_sock.settimeout(5.0)  # timeout per accept loop
             logger.info(f"TCP Server bound on {self.host}:{self.cmd_port} — waiting for NT8 connection...")
+            self._write_health()
         except Exception as e:
             logger.error(f"TCP server bind failed on {self.host}:{self.cmd_port}: {e}")
             raise
@@ -205,6 +216,26 @@ class NinjaTraderBridge:
         self._connected = False
         logger.info("NinjaTraderBridge stopped")
 
+    def _write_health(self) -> None:
+        """Write a health snapshot for watchdog monitoring (best-effort, atomic)."""
+        try:
+            data = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "mode": "paper" if self.paper_mode else "live",
+                "connected": self._connected,
+                "orders_sent": self.orders_sent,
+                "orders_filled": self.orders_filled,
+                "last_fill_ts": (
+                    self.position.last_fill_time.isoformat()
+                    if self.position.last_fill_time else None
+                ),
+            }
+            tmp = self._health_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            tmp.replace(self._health_file)
+        except Exception:
+            pass
+
     # ============================================================
     # TCP Server: accept loop
     # ============================================================
@@ -238,6 +269,7 @@ class NinjaTraderBridge:
                     self._connected = True
 
                 logger.info(f"NT8 connected from {addr[0]}:{addr[1]}")
+                self._write_health()
                 self._send_alert("✅ NinjaTrader 8 connesso a P1UNI", "INFO")
 
                 # Thread: ricevi eventi da NT8
@@ -287,6 +319,7 @@ class NinjaTraderBridge:
                 self._client_sock = None
                 self._connected = False
         logger.warning("NT8 connection lost — waiting for reconnect...")
+        self._write_health()
         self._send_alert("⚠️ NT8 disconnesso da P1UNI — attesa riconnessione", "WARNING")
 
     def _handle_nt8_event(self, event: dict[str, Any]) -> None:
@@ -351,6 +384,7 @@ class NinjaTraderBridge:
                 if self._connected:
                     logger.warning("NT8 heartbeat failed — connection may be lost")
                 # Don't set _connected=False here: let _recv_loop handle it
+            self._write_health()
 
     # ============================================================
     # Send to NT8

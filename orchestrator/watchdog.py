@@ -80,6 +80,7 @@ PYW = r"C:\Program Files\Python313\pythonw.exe"
 
 IBC_TWS_LNK = r"C:\IBC\IBC (TWS).lnk"
 NT8_EXE = r"C:\Program Files (x86)\NinjaTrader 8\bin64\NinjaTrader.exe"
+BRIDGE_PORT = 5555      # ninja_bridge.py TCP server; NT8 connects as client
 
 P1UNI = str(P1UNI_DIR)
 P1LITE = r"C:\Users\annal\Desktop\p1-lite"
@@ -156,7 +157,8 @@ SERVICES: List[Service] = [
         launch_cmd=["cmd", "/c", "start", "", NT8_EXE],
         launch_cwd=r"C:\Program Files (x86)\NinjaTrader 8\bin64",
         external=True,                          # manual start (login prompt)
-        operating_hours=OP_MARKET_DAYS,
+        port_check=BRIDGE_PORT,                 # bridge must be listening for NT8 to connect
+        operating_hours=OP_RTH,                 # alert only during trading window 15:25-22:05
     ),
     Service(
         name="p1uni_main",
@@ -335,7 +337,11 @@ def inspect(svc: Service, procs: List[dict]) -> Status:
     if svc.port_check is not None:
         st.port_ok = port_listening(svc.port_check)
         if not st.port_ok:
-            st.alive = False
+            if not svc.external:
+                # For managed services, port down means dead (e.g. TWS not yet ready).
+                # For external services (NT8), port is informational: process may be alive
+                # but bridge not in live mode — don't override the process match result.
+                st.alive = False
             st.reason = f"port {svc.port_check} not listening"
         elif not st.alive:
             # Port is listening even though process match failed (e.g. TWS started
@@ -635,8 +641,21 @@ def supervise(state: dict, fix: bool) -> dict:
 
                 if svc.external:
                     if not st.alive:
-                        log.warning("EXTERNAL %s DOWN - manual start required", svc.name)
+                        port_info = ""
+                        if svc.port_check is not None:
+                            port_info = (f" | bridge port {svc.port_check} "
+                                         f"{'OK' if st.port_ok else 'DOWN'}")
+                        if st.expected_up:
+                            log.error("EXTERNAL %s DOWN during trading hours%s — manual start required",
+                                      svc.name, port_info)
+                        else:
+                            log.warning("EXTERNAL %s DOWN%s — manual start required",
+                                        svc.name, port_info)
                         st.action = "external-down"
+                    elif st.stale:
+                        log.warning("EXTERNAL %s STALE (age=%.0fs) — bridge may not be connected to NT8",
+                                    svc.name, st.health_age_sec or 0)
+                        st.action = "external-stale"
                     launched.add(svc.name)
                     continue
 
