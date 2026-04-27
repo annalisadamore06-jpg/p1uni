@@ -79,7 +79,7 @@ PY = r"C:\Program Files\Python313\python.exe"
 PYW = r"C:\Program Files\Python313\pythonw.exe"
 
 IBC_TWS_LNK = r"C:\IBC\IBC (TWS).lnk"
-NT8_EXE = r"C:\Program Files (x86)\NinjaTrader 8\bin64\NinjaTrader.exe"
+NT8_EXE = r"C:\NinjaTrader 8\bin\NinjaTrader.exe"
 BRIDGE_PORT = 5555      # ninja_bridge.py TCP server; NT8 connects as client
 
 P1UNI = str(P1UNI_DIR)
@@ -154,16 +154,16 @@ SERVICES: List[Service] = [
         category="EXEC",
         match_cmd=[],
         match_name=["ninjatrader.exe"],
-        launch_cmd=["cmd", "/c", "start", "", NT8_EXE],
-        launch_cwd=r"C:\Program Files (x86)\NinjaTrader 8\bin64",
-        external=True,                          # manual start (login prompt)
-        port_check=BRIDGE_PORT,                 # bridge must be listening for NT8 to connect
-        operating_hours=OP_RTH,                 # alert only during trading window 15:25-22:05
+        launch_cmd=[r"C:\Users\annal\Desktop\P1UNI\orchestrator\start_nt8_with_login.bat"],
+        launch_cwd=r"C:\NinjaTrader 8\bin",
+        external=False,                         # auto-launch with auto-login wrapper
+        operating_hours=OP_ALWAYS,              # NT8 sempre vivo
+        cooldown_sec=600,                       # NT8 launch + login ha bisogno di tempo
     ),
     Service(
         name="p1uni_main",
         category="EXEC",
-        match_cmd=["main.py", "--mode", "paper"],
+        match_cmd=["main.py", "--mode"],
         match_name=["python.exe", "pythonw.exe"],
         launch_cmd=[PYW, "main.py", "--mode", "paper", "--config", r"config\settings.yaml"],
         launch_cwd=P1UNI,
